@@ -11,24 +11,44 @@ echo "🚀 Server starting on http://$host:$port (workers: $workers, maxRequests
 
 function read_request($sock): string
 {
-    $data  = '';
-    $start = microtime(true);
+    $data        = '';
+    $start       = microtime(true);
+    $headersDone = false;
+    $expected    = 0;
 
     while (true) {
-        $r = [$sock]; $w = $e = [];
-        if (!stream_select($r, $w, $e, 0, 1000)) break;
+        $r = [$sock];
+        $w = $e = [];
+
+        // Body bekliyorsak daha uzun bekle
+        $timeout = $headersDone ? 5000 : 1000;
+        if (!stream_select($r, $w, $e, 0, $timeout)) {
+            // Timeout — headers geldiyse ve body bekliyorsak devam et
+            if ($headersDone && $expected > 0) {
+                [, $bodyPart] = explode("\r\n\r\n", $data, 2);
+                if (strlen($bodyPart) >= $expected) break;
+                if ((microtime(true) - $start) > 30) break;
+                continue;
+            }
+            break;
+        }
 
         $chunk = fread($sock, 65536);
         if ($chunk === false || $chunk === '') break;
 
         $data .= $chunk;
 
-        if (str_contains($data, "\r\n\r\n")) {
+        if (!$headersDone && str_contains($data, "\r\n\r\n")) {
+            $headersDone = true;
             preg_match('/Content-Length:\s*(\d+)/i', $data, $cl);
-            if (!$cl) break;
+            $expected = (int) ($cl[1] ?? 0);
 
+            if ($expected === 0) break; // GET veya body yok
+        }
+
+        if ($headersDone) {
             [, $bodyPart] = explode("\r\n\r\n", $data, 2);
-            if (strlen($bodyPart) >= (int) $cl[1]) break;
+            if (strlen($bodyPart) >= $expected) break;
         }
 
         if ((microtime(true) - $start) > 30) break;
@@ -137,32 +157,26 @@ function parse_multipart(string $body, string $boundary, array &$post, array &$f
     $delimiter = '--' . $boundary;
     $parts     = explode($delimiter, $body);
 
-    // İlk boş + son -- parçasını at
     array_shift($parts);
     array_pop($parts);
 
     foreach ($parts as $part) {
-        // \r\n ile başlıyorsa temizle
         $part = ltrim($part, "\r\n");
 
-        // Son boundary işareti
         if (str_starts_with($part, '--')) continue;
         if (!str_contains($part, "\r\n\r\n")) continue;
 
         [$partHeaders, $partBody] = explode("\r\n\r\n", $part, 2);
         $partBody = rtrim($partBody, "\r\n");
 
-        // name
         preg_match('/Content-Disposition:[^\r\n]*;\s*name="([^"]+)"/i', $partHeaders, $nm);
         $name = $nm[1] ?? '';
         if (!$name) continue;
 
-        // filename
         preg_match('/;\s*filename="([^"]*)"/i', $partHeaders, $fm);
         $filename = $fm[1] ?? '';
 
-        // files[] veya files[0] gibi array field mi?
-        $isArray  = str_ends_with($name, '[]') || preg_match('/\[(\d*)\]$/', $name);
+        $isArray  = str_ends_with($name, '[]') || preg_match('/\[\d*\]$/', $name);
         $baseName = $isArray ? preg_replace('/\[\d*\]$|\[\]$/', '', $name) : $name;
 
         if ($filename !== '') {
@@ -173,7 +187,6 @@ function parse_multipart(string $body, string $boundary, array &$post, array &$f
             file_put_contents($tmpFile, $partBody);
 
             if ($isArray) {
-                // PHP standart $_FILES array formatı
                 $files[$baseName]['name'][]     = $filename;
                 $files[$baseName]['type'][]     = $mimeType;
                 $files[$baseName]['tmp_name'][] = $tmpFile;
@@ -260,7 +273,6 @@ for ($i = 0; $i < $workers; $i++) {
             if (stream_select($readSockets, $w, $e, 0, $tv) === false) continue;
 
             foreach ($readSockets as $sock) {
-                // Yeni bağlantı
                 if ($sock === $server) {
                     $conn = @stream_socket_accept($server, 0);
                     if ($conn) {
@@ -285,9 +297,8 @@ for ($i = 0; $i < $workers; $i++) {
 
                 try {
                     $req       = parse_request_raw($data);
-                    print_r($req->headers);
                     $keepAlive = strtolower($req->headers['connection'] ?? 'keep-alive') !== 'close'
-                                 && !isset($req->query['_close']);
+                        && !isset($req->query['_close']);
 
                     $res = $app->handle($req, $keepAlive);
                     fwrite($sock, $res);
@@ -300,12 +311,13 @@ for ($i = 0; $i < $workers; $i++) {
                     }
                 } catch (\Throwable $ex) {
                     $error = "500 Internal Server Error\n" . $ex->getMessage();
-                    fwrite($sock,
+                    fwrite(
+                        $sock,
                         "HTTP/1.1 500 Internal Server Error\r\n" .
-                        "Content-Type: text/plain\r\n" .
-                        "Connection: close\r\n" .
-                        "Content-Length: " . strlen($error) . "\r\n\r\n" .
-                        $error
+                            "Content-Type: text/plain\r\n" .
+                            "Connection: close\r\n" .
+                            "Content-Length: " . strlen($error) . "\r\n\r\n" .
+                            $error
                     );
                     @fclose($sock);
                     unset($connections[$key], $socketMap[$key]);
