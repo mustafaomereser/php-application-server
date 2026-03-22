@@ -60,6 +60,11 @@ sudo mkdir -p $APP_DIR
 sudo cp -r . $APP_DIR
 sudo chown -R www-data:www-data $APP_DIR
 
+# Create .well-known/acme-challenge for Certbot
+echo "🔑 Creating ACME challenge directory"
+sudo mkdir -p $APP_DIR/.well-known/acme-challenge
+sudo chown -R www-data:www-data $APP_DIR/.well-known
+
 # Create systemd service
 if [ "$DAEMON_SUPPORT" = true ]; then
     echo "⚙️ Creating systemd service..."
@@ -88,12 +93,17 @@ else
     echo "⚠️ Daemon setup skipped. Run manually: php $APP_DIR/server.php $PORT"
 fi
 
-# Configure Nginx + Certbot
+# Configure Nginx
 NGINX_CONF="/etc/nginx/sites-available/$APP_NAME"
 sudo bash -c "cat > $NGINX_CONF" <<EOL
 server {
     listen 80;
     server_name $DOMAIN www.$DOMAIN;
+
+    location /.well-known/acme-challenge/ {
+        root $APP_DIR;
+        allow all;
+    }
 
     location / {
         proxy_pass http://127.0.0.1:$PORT;
