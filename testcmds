@@ -1,0 +1,3 @@
+git pull
+sudo cp -r ~/myapp/. /var/www/myphpapp/
+sudo systemctl restart myphpapp

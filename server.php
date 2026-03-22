@@ -4,7 +4,7 @@ require 'App.php';
 
 $host        = "0.0.0.0";
 $port        = $argv[1] ?? 8080;
-$workers     = $argv[2] ?? 16;
+$workers     = $argv[2] ?? 4;
 $maxRequests = $argv[3] ?? 1000;
 
 $server = stream_socket_server(
@@ -39,7 +39,6 @@ function read_request($sock): string
         if (str_contains($data, "\r\n\r\n")) {
             preg_match('/Content-Length:\s*(\d+)/i', $data, $cl);
             if (!$cl) break;
-
             [, $body] = explode("\r\n\r\n", $data, 2);
             if (strlen($body) >= (int) $cl[1]) break;
         }
@@ -82,6 +81,9 @@ function parse_request_raw(string $raw): object
 
     $contentType = $headers['content-type'] ?? '';
 
+    // Superglobals — global scope'ta set et
+    global $_GET, $_POST, $_FILES, $_REQUEST, $_SERVER;
+
     $_GET   = $query;
     $_POST  = [];
     $_FILES = [];
@@ -94,7 +96,7 @@ function parse_request_raw(string $raw): object
             if (is_array($decoded)) $_POST = $decoded;
         } elseif (str_contains($contentType, 'multipart/form-data')) {
             preg_match('/boundary=([^\s;]+)/', $contentType, $bm);
-            if ($bm[1] ?? '') parse_multipart($body, $bm[1], $_POST, $_FILES);
+            if (!empty($bm[1])) parse_multipart($body, $bm[1], $_POST, $_FILES);
         }
     }
 
@@ -181,6 +183,7 @@ function parse_multipart(string $body, string $boundary, array &$post, array &$f
 
 function cleanup_tmp_files(): void
 {
+    global $_FILES;
     foreach ($_FILES as $file) {
         if (!empty($file['tmp_name']) && file_exists($file['tmp_name'])) {
             unlink($file['tmp_name']);
@@ -190,6 +193,7 @@ function cleanup_tmp_files(): void
 
 function reset_superglobals(): void
 {
+    global $_GET, $_POST, $_FILES, $_REQUEST, $_SERVER;
     $_GET = $_POST = $_FILES = $_REQUEST = $_SERVER = [];
 }
 
@@ -199,23 +203,19 @@ for ($i = 0; $i < $workers; $i++) {
         echo "👷 Worker #$i started (PID: " . getmypid() . ")\n";
 
         $app          = new App();
-        $connections  = []; // [int_key => ['socket' => resource, 'time' => int]]
+        $connections  = []; // [socket_int_key => ['socket' => resource, 'time' => int]]
+        $socketMap    = []; // stream_select sonuçlarını hızlı lookup için
         $requestCount = 0;
+        $lastCleanup  = time();
 
         while (true) {
-            // Geçersiz/kapalı socket'leri temizle
-            foreach ($connections as $key => $c) {
-                if (!is_resource($c['socket']) || feof($c['socket'])) {
-                    @fclose($c['socket']);
-                    unset($connections[$key]);
-                }
-            }
-
-            // stream_select için socket listesi
-            $readSockets = array_merge([$server], array_column($connections, 'socket'));
+            // stream_select için socket listesi — socketMap'ten al
+            $readSockets = array_merge([$server], array_values($socketMap));
             $w = $e = [];
 
-            if (stream_select($readSockets, $w, $e, 0, 100000) === false) continue;
+            // Bağlantı varsa 0 timeout (hızlı dön), yoksa 100ms bekle
+            $tv = empty($socketMap) ? 100000 : 0;
+            if (stream_select($readSockets, $w, $e, 0, $tv) === false) continue;
 
             foreach ($readSockets as $sock) {
                 // Yeni bağlantı
@@ -223,23 +223,21 @@ for ($i = 0; $i < $workers; $i++) {
                     $conn = stream_socket_accept($server, 0);
                     if ($conn) {
                         stream_set_blocking($conn, false);
-                        $connections[(int) $conn] = [
-                            'socket' => $conn,
-                            'time'   => time(),
-                        ];
+                        $key               = (int) $conn;
+                        $connections[$key] = ['socket' => $conn, 'time' => time()];
+                        $socketMap[$key]   = $conn;
                     }
                     continue;
                 }
 
-                // Keep-alive bağlantıdan yeni istek
-                if (!isset($connections[(int) $sock])) continue;
-                $conn = $sock;
+                $key = (int) $sock;
+                if (!isset($connections[$key])) continue;
 
-                $data = read_request($conn);
+                $data = read_request($sock);
 
                 if (!$data) {
-                    @fclose($conn);
-                    unset($connections[(int) $conn]);
+                    @fclose($sock);
+                    unset($connections[$key], $socketMap[$key]);
                     continue;
                 }
 
@@ -248,25 +246,25 @@ for ($i = 0; $i < $workers; $i++) {
                     $keepAlive = strtolower($req->headers['connection'] ?? 'keep-alive') !== 'close';
 
                     $res = $app->handle($req, $keepAlive);
-                    fwrite($conn, $res);
+                    fwrite($sock, $res);
 
                     if ($keepAlive) {
-                        $connections[(int) $conn]['time'] = time();
+                        $connections[$key]['time'] = time();
                     } else {
-                        @fclose($conn);
-                        unset($connections[(int) $conn]);
+                        @fclose($sock);
+                        unset($connections[$key], $socketMap[$key]);
                     }
                 } catch (\Throwable $ex) {
                     $error = "500 Internal Server Error\n" . $ex->getMessage();
-                    fwrite($conn,
+                    fwrite($sock,
                         "HTTP/1.1 500 Internal Server Error\r\n" .
                         "Content-Type: text/plain\r\n" .
                         "Connection: close\r\n" .
                         "Content-Length: " . strlen($error) . "\r\n\r\n" .
                         $error
                     );
-                    @fclose($conn);
-                    unset($connections[(int) $conn]);
+                    @fclose($sock);
+                    unset($connections[$key], $socketMap[$key]);
                 } finally {
                     cleanup_tmp_files();
                     reset_superglobals();
@@ -281,13 +279,16 @@ for ($i = 0; $i < $workers; $i++) {
                 }
             }
 
-            // 5 saniye idle bağlantıları kapat
+            // Her 5 saniyede bir idle bağlantıları temizle
             $now = time();
-            foreach ($connections as $key => $c) {
-                if (($now - $c['time']) > 5) {
-                    @fclose($c['socket']);
-                    unset($connections[$key]);
+            if ($now - $lastCleanup >= 5) {
+                foreach ($connections as $key => $c) {
+                    if (($now - $c['time']) > 5 || !is_resource($c['socket']) || feof($c['socket'])) {
+                        @fclose($c['socket']);
+                        unset($connections[$key], $socketMap[$key]);
+                    }
                 }
+                $lastCleanup = $now;
             }
         }
 
