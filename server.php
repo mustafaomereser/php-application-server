@@ -60,34 +60,26 @@ function parse_request_raw(string $raw): object
 
 function read_request($sock): string
 {
-    $data  = '';
-    $start = microtime(true);
+    $data = '';
 
     while (true) {
         $r = [$sock];
         $w = $e = [];
+        // 5ms bekle, gelmezse çık
+        if (!stream_select($r, $w, $e, 0, 5000)) break;
 
-        if (!stream_select($r, $w, $e, 0, 50000)) {
-            break; // 50ms timeout
-        }
-
-        $chunk = fread($sock, 4096);
+        $chunk = fread($sock, 8192);
         if ($chunk === false || $chunk === '') break;
 
         $data .= $chunk;
 
         if (str_contains($data, "\r\n\r\n")) {
-            // POST body varsa Content-Length kadar bekle
             preg_match('/Content-Length:\s*(\d+)/i', $data, $cl);
-            if ($cl) {
-                [, $body] = explode("\r\n\r\n", $data, 2);
-                if (strlen($body) >= (int) $cl[1]) break;
-            } else {
-                break;
-            }
-        }
+            if (!$cl) break; // GET request, headers tamam, çık
 
-        if ((microtime(true) - $start) > 0.05) break; // 50ms hard limit
+            [, $body] = explode("\r\n\r\n", $data, 2);
+            if (strlen($body) >= (int) $cl[1]) break; // POST body tamam, çık
+        }
     }
 
     return $data;
