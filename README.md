@@ -8,16 +8,21 @@
 ### Features
 - Long-running PHP application (boot once)
 - Multi-worker support for concurrent requests
-- Event-loop architecture for non-blocking connections
+- Event-loop architecture (stream_select, non-blocking)
+- Keep-alive connection support
+- Automatic superglobal population ($_GET, $_POST, $_FILES, $_SERVER, $_REQUEST)
+- File upload support (multipart/form-data)
+- JSON and form-urlencoded body parsing
 - Request reset mechanism to prevent state leakage
-- Minimalist and lightweight
+- Memory leak prevention via configurable max requests per worker
 - ACME challenge support for automatic SSL via Certbot
 - Systemd service for daemonized backend
+- Nginx upstream keepalive for maximum performance
 
 ### Requirements
 - PHP 8.x or higher
 - Linux / macOS (Windows not fully supported due to `pcntl_fork`)
-- Optional: Nginx for reverse proxy
+- Nginx for reverse proxy
 - Domain with DNS A/CNAME pointing to your server
 
 ### Installation
@@ -26,27 +31,55 @@
 git clone <your-repo-url> myapp
 cd myapp
 
-# Make server script executable
-chmod +x server.php
+# Make scripts executable
+chmod +x server.php install.sh
 
 # Start the server manually (development)
 php server.php
+# or with custom options:
+php server.php [port] [workers] [maxRequests]
+# example: php server.php 8080 4 1000
 ```
 
-### Production Setup (Recommended)
+### Parameters
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| port | 8080 | TCP port to listen on |
+| workers | 4 | Number of worker processes |
+| maxRequests | 1000 | Requests per worker before restart (memory leak prevention) |
 
-1. **Systemd service for backend server**
+### Production Setup (Recommended)
+```bash
+# Run the automated installer
+bash install.sh
+```
+
+The installer will prompt for:
+- App name (used for directory, service, and Nginx config names)
+- Backend port
+- Domain name
+
+It will automatically:
+1. Install PHP, Nginx, Certbot if missing
+2. Copy app to `/var/www/<appname>/`
+3. Create and enable systemd service
+4. Configure Nginx with upstream keepalive
+5. Obtain SSL certificate via Certbot
+6. Enable SSL session tickets for faster reconnects
+
+### Manual Production Setup
+
+1. **Systemd service**
 ```bash
 sudo nano /etc/systemd/system/myapp.service
 ```
-Paste:
-```
+```ini
 [Unit]
 Description=Mini PHP App Server
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/php /var/www/myapp/server.php 8080
+ExecStart=/usr/bin/php /var/www/myapp/server.php 8080 4 1000
 WorkingDirectory=/var/www/myapp
 Restart=always
 User=www-data
@@ -55,58 +88,192 @@ Group=www-data
 [Install]
 WantedBy=multi-user.target
 ```
-Enable and start:
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable myapp
 sudo systemctl start myapp
-sudo systemctl status myapp
 ```
 
-2. **Nginx Reverse Proxy with ACME challenge support**
+2. **Nginx config**
 ```nginx
+upstream myapp_backend {
+    server 127.0.0.1:8080;
+    keepalive 32;
+    keepalive_requests 1000;
+    keepalive_timeout 65s;
+}
+
 server {
     listen 80;
     server_name yourdomain.com www.yourdomain.com;
 
-    # ACME challenge directory for Certbot
     location /.well-known/acme-challenge/ {
         root /var/www/myapp;
         allow all;
     }
 
     location / {
-        proxy_pass http://127.0.0.1:8080;
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    server_name yourdomain.com www.yourdomain.com;
+
+    ssl_certificate /etc/letsencrypt/live/yourdomain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/yourdomain.com/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+    ssl_session_ticket_key /etc/nginx/ssl_ticket.key;
+
+    location / {
+        proxy_pass http://myapp_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
+        proxy_buffering off;
+        proxy_request_buffering off;
     }
 }
 ```
 
-3. **Enable firewall**
+3. **SSL session ticket key**
 ```bash
-sudo ufw allow 80
-sudo ufw allow 443
-sudo ufw enable
-sudo ufw status
+sudo openssl rand 80 | sudo tee /etc/nginx/ssl_ticket.key > /dev/null
+sudo chmod 600 /etc/nginx/ssl_ticket.key
 ```
 
-4. **Install Certbot and obtain SSL certificate**
+4. **Enable SSL session tickets in Certbot config**
 ```bash
-sudo apt install certbot python3-certbot-nginx -y
-sudo certbot --nginx -d yourdomain.com -d www.yourdomain.com --non-interactive --agree-tos -m admin@yourdomain.com
+sudo sed -i 's/ssl_session_tickets off/ssl_session_tickets on/' /etc/letsencrypt/options-ssl-nginx.conf
+```
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+---
+
+### Service Management
+
+```bash
+# Start
+sudo systemctl start myapp
+
+# Stop
+sudo systemctl stop myapp
+
+# Restart
+sudo systemctl restart myapp
+
+# Reload Nginx
 sudo systemctl reload nginx
+
+# Restart both
+sudo systemctl restart myapp && sudo systemctl reload nginx
+
+# Status
+sudo systemctl status myapp
+
+# Live logs
+sudo journalctl -u myapp -f
 ```
 
-### Usage
-- Access in browser: `http://localhost:8080` (dev) or `https://yourdomain.com` (production)
-- Works with your existing framework views and controllers
+---
+
+### Testing & Debugging
+
+**Basic response test (bypass Nginx):**
+```bash
+curl -w "\nTTFB: %{time_starttransfer}s | Total: %{time_total}s\n" http://localhost:8080/ -s -o /dev/null
+```
+
+**Keep-alive test (bypass Nginx):**
+```bash
+curl -w "\nTTFB: %{time_starttransfer}s | Total: %{time_total}s\n" \
+  -H "Connection: keep-alive" http://localhost:8080/ -s -o /dev/null
+```
+
+**Full HTTPS test:**
+```bash
+curl -w "\nTTFB: %{time_starttransfer}s | Total: %{time_total}s\n" \
+  https://yourdomain.com/ -s -o /dev/null
+```
+
+**Detailed timing breakdown:**
+```bash
+curl -w "\ndns: %{time_namelookup}s | connect: %{time_connect}s | ssl: %{time_appconnect}s | ttfb: %{time_starttransfer}s | total: %{time_total}s\n" \
+  https://yourdomain.com/ -s -o /dev/null
+```
+
+**Keep-alive with multiple requests:**
+```bash
+curl -w "\nTTFB: %{time_starttransfer}s\n" https://yourdomain.com/ -s -o /dev/null
+curl -w "\nTTFB: %{time_starttransfer}s\n" https://yourdomain.com/ -s -o /dev/null --keepalive-time 30
+curl -w "\nTTFB: %{time_starttransfer}s\n" https://yourdomain.com/ -s -o /dev/null --keepalive-time 30
+```
+
+**Check response headers:**
+```bash
+curl -v http://localhost:8080/ 2>&1 | grep "< "
+curl -v -H "Connection: keep-alive" http://localhost:8080/ 2>&1 | grep "< "
+```
+
+**Check Nginx upstream keepalive (new TCP connections per request):**
+```bash
+# Terminal 1 - watch for SYN packets
+sudo tcpdump -i lo port 8080 -n 2>/dev/null | grep "Flags \[S\]"
+
+# Terminal 2 - send requests
+curl -s -o /dev/null https://yourdomain.com/
+curl -s -o /dev/null https://yourdomain.com/
+curl -s -o /dev/null https://yourdomain.com/
+# If keepalive works: only 1 SYN per session, not per request
+```
+
+**Check what Nginx sends upstream:**
+```bash
+sudo tcpdump -i lo port 8080 -A -n 2>/dev/null | grep "Connection:"
+# Should be empty (Connection header stripped) not "Connection: close"
+```
+
+**Monitor worker CPU and memory:**
+```bash
+top -p $(pgrep -d',' php)
+# All workers should show ~0% CPU when idle, S (sleeping) state
+```
+
+**Nginx timing log setup:**
+```bash
+# Add to http{} block in /etc/nginx/nginx.conf:
+# log_format timing '$remote_addr "$request" $status upstream_response=$upstream_response_time request=$request_time';
+# access_log /var/log/nginx/timing.log timing;
+
+sudo tail -f /var/log/nginx/timing.log
+```
+
+**Check Nginx config:**
+```bash
+sudo nginx -T | grep -E "upstream|keepalive|proxy_http_version|Connection"
+```
+
+**Check SSL session tickets:**
+```bash
+curl -v https://yourdomain.com/ 2>&1 | grep -i "SSL\|reuse\|ticket\|session"
+```
+
+---
 
 ### Notes
-- Restart workers periodically to prevent memory leaks
-- ACME challenge `.well-known/acme-challenge` directory must be accessible for SSL
-- Windows is not fully supported (use WSL or Linux/macOS)
-- Ensure your DNS records for `domain.com` and `www.domain.com` point to your server
+- TTFB from PHP server itself should be under 2ms
+- TTFB including Nginx proxy overhead should be under 5ms
+- Remaining latency is network round-trip (unavoidable)
+- Workers restart automatically after `maxRequests` to prevent memory leaks
+- Systemd `Restart=always` ensures workers are always running
+- Windows is not supported (use WSL or Linux/macOS)
+- `$_FILES` tmp files are automatically cleaned up after each request
 
 ---
 
@@ -118,16 +285,21 @@ sudo systemctl reload nginx
 ### Özellikler
 - Uzun ömürlü PHP uygulaması (bir kez boot)
 - Çoklu worker desteği ile paralel istekler
-- Event-loop mimarisi ile non-blocking bağlantılar
+- Event-loop mimarisi (stream_select, non-blocking)
+- Keep-alive bağlantı desteği
+- Otomatik superglobal doldurma ($_GET, $_POST, $_FILES, $_SERVER, $_REQUEST)
+- Dosya yükleme desteği (multipart/form-data)
+- JSON ve form-urlencoded body parse
 - Request sonrası reset mekanizması ile state sızıntısını önler
-- Minimalist ve hafif
+- Yapılandırılabilir max request ile memory leak önlemi
 - Certbot ile otomatik SSL desteği (ACME challenge)
 - Systemd servisi ile daemon backend
+- Maksimum performans için Nginx upstream keepalive
 
 ### Gereksinimler
 - PHP 8.x veya üstü
 - Linux / macOS (Windows tam desteklenmez, `pcntl_fork` nedeniyle)
-- Opsiyonel: Reverse proxy için Nginx
+- Reverse proxy için Nginx
 - Domain ve DNS A/CNAME kaydı sunucuya yönlendirilmiş olmalı
 
 ### Kurulum
@@ -136,84 +308,80 @@ sudo systemctl reload nginx
 git clone <repo-url> myapp
 cd myapp
 
-# Server script'i çalıştırılabilir yap
-chmod +x server.php
+# Script'leri çalıştırılabilir yap
+chmod +x server.php install.sh
 
 # Server'ı manuel başlat (geliştirme)
 php server.php
+# veya özel parametrelerle:
+php server.php [port] [worker_sayisi] [maxIstek]
+# örnek: php server.php 8080 4 1000
 ```
+
+### Parametreler
+| Parametre | Varsayılan | Açıklama |
+|-----------|------------|----------|
+| port | 8080 | Dinlenecek TCP portu |
+| workers | 4 | Worker process sayısı |
+| maxRequests | 1000 | Worker başına max istek (memory leak önlemi) |
 
 ### Üretim Ortamı Kurulumu (Önerilen)
-
-1. **Systemd servisi oluştur**
 ```bash
-sudo nano /etc/systemd/system/myapp.service
+bash install.sh
 ```
-İçeriğe yapıştır:
-```
-[Unit]
-Description=Mini PHP App Server
-After=network.target
 
-[Service]
-ExecStart=/usr/bin/php /var/www/myapp/server.php 8080
-WorkingDirectory=/var/www/myapp
-Restart=always
-User=www-data
-Group=www-data
+### Servis Yönetimi
 
-[Install]
-WantedBy=multi-user.target
-```
-Aktifleştir ve başlat:
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable myapp
+# Başlat
 sudo systemctl start myapp
-sudo systemctl status myapp
-```
 
-2. **Nginx Reverse Proxy + ACME challenge**
-```nginx
-server {
-    listen 80;
-    server_name siteadresiniz.com www.siteadresiniz.com;
+# Durdur
+sudo systemctl stop myapp
 
-    # Certbot doğrulama klasörü
-    location /.well-known/acme-challenge/ {
-        root /var/www/myapp;
-        allow all;
-    }
+# Yeniden başlat
+sudo systemctl restart myapp
 
-    location / {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-}
-```
-
-3. **Firewall açma**
-```bash
-sudo ufw allow 80
-sudo ufw allow 443
-sudo ufw enable
-sudo ufw status
-```
-
-4. **Certbot ile SSL alma**
-```bash
-sudo apt install certbot python3-certbot-nginx -y
-sudo certbot --nginx -d siteadresiniz.com -d www.siteadresiniz.com --non-interactive --agree-tos -m admin@siteadresiniz.com
+# Nginx yenile
 sudo systemctl reload nginx
+
+# İkisini birden yeniden başlat
+sudo systemctl restart myapp && sudo systemctl reload nginx
+
+# Durum
+sudo systemctl status myapp
+
+# Canlı log
+sudo journalctl -u myapp -f
 ```
 
-### Kullanım
-- Tarayıcıdan erişim: `http://localhost:8080` (dev) veya `https://siteadresiniz.com` (prod)
-- Mevcut framework view ve controller'larınızla çalışır
+### Test ve Hata Ayıklama
+
+**Temel test (Nginx bypass):**
+```bash
+curl -w "\nTTFB: %{time_starttransfer}s | Total: %{time_total}s\n" http://localhost:8080/ -s -o /dev/null
+```
+
+**Detaylı zamanlama:**
+```bash
+curl -w "\ndns: %{time_namelookup}s | connect: %{time_connect}s | ssl: %{time_appconnect}s | ttfb: %{time_starttransfer}s | total: %{time_total}s\n" \
+  https://yourdomain.com/ -s -o /dev/null
+```
+
+**Worker CPU/RAM izleme:**
+```bash
+top -p $(pgrep -d',' php)
+```
+
+**Nginx upstream keepalive kontrolü:**
+```bash
+sudo tcpdump -i lo port 8080 -n 2>/dev/null | grep "Flags \[S\]"
+```
 
 ### Notlar
-- Worker'ları periyodik olarak restart et, RAM sızıntısını önler
-- ACME challenge `.well-known/acme-challenge` dizini erişilebilir olmalı
-- Windows tam desteklenmez (WSL veya Linux/macOS önerilir)
-- DNS kayıtlarının `domain.com` ve `www.domain.com` sunucuya yönlendiğinden emin ol
+- PHP server TTFB 2ms altında olmalı
+- Nginx dahil TTFB 5ms altında olmalı
+- Kalan gecikme network round-trip (önlenemez)
+- Worker'lar `maxRequests` sonrası otomatik restart atar
+- Windows desteklenmez (WSL veya Linux/macOS kullanın)
+- `$_FILES` tmp dosyaları her request sonrası otomatik temizlenir
