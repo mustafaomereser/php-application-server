@@ -2,7 +2,6 @@
 
 echo "🚀 Starting full automatic setup..."
 
-# Ask user for inputs
 read -p "Enter app name (default: myphpapp): " APP_NAME
 APP_NAME=${APP_NAME:-myphpapp}
 
@@ -18,7 +17,7 @@ fi
 APP_DIR="/var/www/$APP_NAME"
 SERVICE_NAME="$APP_NAME"
 
-# Check PHP
+# PHP
 PHP_BIN=$(which php)
 if [ -z "$PHP_BIN" ]; then
     echo "⚠️ PHP not found. Installing..."
@@ -28,7 +27,7 @@ if [ -z "$PHP_BIN" ]; then
 fi
 echo "✅ PHP found at $PHP_BIN"
 
-# Check systemd
+# systemd
 SYSTEMCTL_BIN=$(which systemctl)
 if [ -z "$SYSTEMCTL_BIN" ]; then
     echo "❌ systemd/systemctl not found. Daemon setup won't work."
@@ -38,7 +37,7 @@ else
     echo "✅ systemd found"
 fi
 
-# Install Nginx
+# Nginx
 NGINX_BIN=$(which nginx)
 if [ -z "$NGINX_BIN" ]; then
     echo "⚠️ Nginx not found. Installing..."
@@ -46,7 +45,7 @@ if [ -z "$NGINX_BIN" ]; then
 fi
 echo "✅ Nginx installed"
 
-# Install Certbot
+# Certbot
 CERTBOT_BIN=$(which certbot)
 if [ -z "$CERTBOT_BIN" ]; then
     echo "⚠️ Certbot not found. Installing..."
@@ -54,21 +53,22 @@ if [ -z "$CERTBOT_BIN" ]; then
 fi
 echo "✅ Certbot installed"
 
-# Create app directory
+# App dizini
 echo "📁 Creating app directory: $APP_DIR"
 sudo mkdir -p $APP_DIR
 sudo cp -r . $APP_DIR
 sudo chown -R www-data:www-data $APP_DIR
 
-# Create .well-known/acme-challenge for Certbot
+# ACME challenge dizini
 echo "🔑 Creating ACME challenge directory"
 sudo mkdir -p $APP_DIR/.well-known/acme-challenge
 sudo chown -R www-data:www-data $APP_DIR/.well-known
 
-# Create systemd service
+# systemd service
 if [ "$DAEMON_SUPPORT" = true ]; then
     echo "⚙️ Creating systemd service..."
     SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
+
     sudo bash -c "cat > $SERVICE_FILE" <<EOL
 [Unit]
 Description=Mini PHP App Server ($APP_NAME)
@@ -93,9 +93,15 @@ else
     echo "⚠️ Daemon setup skipped. Run manually: php $APP_DIR/server.php $PORT"
 fi
 
-# Configure Nginx
+# Nginx config — upstream keepalive ile
 NGINX_CONF="/etc/nginx/sites-available/$APP_NAME"
+
 sudo bash -c "cat > $NGINX_CONF" <<EOL
+upstream ${APP_NAME}_backend {
+    server 127.0.0.1:$PORT;
+    keepalive 32;
+}
+
 server {
     listen 80;
     server_name $DOMAIN www.$DOMAIN;
@@ -106,9 +112,14 @@ server {
     }
 
     location / {
-        proxy_pass http://127.0.0.1:$PORT;
+        proxy_pass http://${APP_NAME}_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_read_timeout 10s;
     }
 }
 EOL
@@ -117,11 +128,17 @@ sudo ln -sf $NGINX_CONF /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl restart nginx
 echo "✅ Nginx configured for $DOMAIN on port 80"
 
-# Obtain SSL automatically with Certbot
+# SSL
 sudo certbot --nginx -d $DOMAIN -d www.$DOMAIN --non-interactive --agree-tos -m admin@$DOMAIN
-echo "✅ SSL installed with Certbot, HTTPS enabled"
 
-# Reload Nginx to apply changes
+# SSL session cache için nginx.conf'a snippet ekle
+sudo bash -c "cat >> /etc/nginx/conf.d/ssl_session.conf" <<EOL
+ssl_session_cache shared:SSL:10m;
+ssl_session_timeout 10m;
+ssl_session_tickets on;
+ssl_protocols TLSv1.2 TLSv1.3;
+ssl_prefer_server_ciphers off;
+EOL
+
 sudo systemctl reload nginx
-
 echo "🔥 Full installation complete! Your app is running at https://$DOMAIN"
