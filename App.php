@@ -47,34 +47,9 @@ class App
 
         // File upload echo
         if ($req->uri === '/test-upload') {
-            $files = [];
-            foreach ($_FILES as $key => $file) {
-                if (is_array($file['name'])) {
-                    // files[] gibi array upload
-                    foreach ($file['name'] as $i => $name) {
-                        $files[] = [
-                            'field'    => $key . '[' . $i . ']',
-                            'name'     => $name,
-                            'type'     => $file['type'][$i],
-                            'size'     => $file['size'][$i],
-                            'error'    => $file['error'][$i],
-                            'tmp_name' => $file['tmp_name'][$i],
-                        ];
-                    }
-                } else {
-                    $files[] = [
-                        'field'    => $key,
-                        'name'     => $file['name'],
-                        'type'     => $file['type'],
-                        'size'     => $file['size'],
-                        'error'    => $file['error'],
-                        'tmp_name' => $file['tmp_name'],
-                    ];
-                }
-            }
             $output = json_encode([
-                'files'  => $files,
-                '_POST'  => $_POST,
+                '_FILES'  => $_FILES,
+                '_POST'   => $_POST,
             ], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
             return $this->response($output, 200, $keepAlive, 'application/json');
         }
