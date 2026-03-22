@@ -98,12 +98,13 @@ class App
         $extra      = $keepAlive ? "Keep-Alive: timeout=5, max=1000\r\n" : '';
 
         return "HTTP/1.1 $status $text\r\n" .
-               "Content-Type: $contentType\r\n" .
-               "Connection: $connection\r\n" .
-               $extra .
-               "Content-Length: " . strlen($content) . "\r\n" .
-               "\r\n" .
-               $content;
+            "Content-Type: $contentType\r\n" .
+            "Connection: $connection\r\n" .
+            $extra .
+            "Content-Length: " . strlen($content) . "\r\n" .
+            "X-Worker-ID: " . (defined('WORKER_ID') ? WORKER_ID : '?') . "\r\n" .
+            "\r\n" .
+            $content;
     }
 
     public function reset(): void

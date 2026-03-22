@@ -153,48 +153,59 @@ function parse_request_raw(string $raw): object
 
 function parse_multipart(string $body, string $boundary, array &$post, array &$files): void
 {
-    $boundary  = '--' . $boundary;
-    $parts     = explode($boundary, $body);
+    $boundary = '--' . $boundary;
+    $parts    = explode($boundary, $body);
 
-    // İlk ve son parçayı atla
     array_shift($parts);
     array_pop($parts);
 
     foreach ($parts as $part) {
         if (str_starts_with($part, '--')) continue;
-
-        // Header ve body ayır
         if (!str_contains($part, "\r\n\r\n")) continue;
+
         [$partHeaders, $partBody] = explode("\r\n\r\n", ltrim($part, "\r\n"), 2);
         $partBody = rtrim($partBody, "\r\n");
 
-        // Content-Disposition parse et
         preg_match('/Content-Disposition:[^\r\n]*name="([^"]+)"/', $partHeaders, $nm);
         $name = $nm[1] ?? '';
         if (!$name) continue;
 
-        // Dosya mı alan mı?
         preg_match('/filename="([^"]*)"/', $partHeaders, $fm);
         $filename = $fm[1] ?? '';
 
-        if ($filename !== '') {
-            // Dosya — tmp'ye kaydet
-            $tmpFile = tempnam(sys_get_temp_dir(), 'php_upload_');
-            file_put_contents($tmpFile, $partBody);
+        // bracket kontrolü: files[] veya files[0] gibi
+        $isArray = str_ends_with($name, '[]') || preg_match('/\[\d*\]$/', $name);
+        $baseName = $isArray ? preg_replace('/\[\d*\]$|\[\]$/', '', $name) : $name;
 
+        if ($filename !== '') {
             preg_match('/Content-Type:\s*([^\r\n]+)/i', $partHeaders, $ctm);
             $mimeType = trim($ctm[1] ?? 'application/octet-stream');
 
-            $files[$name] = [
+            $tmpFile = tempnam(sys_get_temp_dir(), 'php_upload_');
+            file_put_contents($tmpFile, $partBody);
+
+            $fileEntry = [
                 'name'     => $filename,
                 'type'     => $mimeType,
                 'tmp_name' => $tmpFile,
                 'error'    => UPLOAD_ERR_OK,
                 'size'     => strlen($partBody),
             ];
+
+            if ($isArray) {
+                // $_FILES['files']['name'][] formatı
+                foreach ($fileEntry as $k => $v) {
+                    $files[$baseName][$k][] = $v;
+                }
+            } else {
+                $files[$baseName] = $fileEntry;
+            }
         } else {
-            // Normal alan
-            $post[$name] = $partBody;
+            if ($isArray) {
+                $post[$baseName][] = $partBody;
+            } else {
+                $post[$name] = $partBody;
+            }
         }
     }
 }
@@ -217,6 +228,7 @@ for ($i = 0; $i < $workers; $i++) {
     if (pcntl_fork() === 0) {
         echo "👷 Worker #$i started (PID: " . getmypid() . ")\n";
 
+        define('WORKER_ID', $i); // <-- ekle
         $app          = new App();
         $connections  = [];
         $requestCount = 0;
