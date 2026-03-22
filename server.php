@@ -121,13 +121,15 @@ function parse_request_raw(string $raw): object
 }
 function parse_multipart(string $body, string $boundary, array &$post, array &$files): void
 {
-    // Body'deki ilk boundary satırını bul, onu kullan
     preg_match('/^(--[^\r\n]+)/', $body, $bm);
     $delimiter = $bm[1] ?? ('--' . $boundary);
 
+    echo "BOUNDARY: $boundary\n";
+    echo "DELIMITER: $delimiter\n";
+    echo "BODY START: " . substr($body, 0, 100) . "\n";
+
     $parts = explode($delimiter, $body);
-    array_shift($parts); // ilk boş parça
-    array_pop($parts);   // son -- parça
+    echo "PARTS COUNT: " . count($parts) . "\n";
 
     foreach ($parts as $part) {
         $part = ltrim($part, "\r\n");
