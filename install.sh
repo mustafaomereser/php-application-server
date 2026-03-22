@@ -8,6 +8,12 @@ APP_NAME=${APP_NAME:-myphpapp}
 read -p "Enter backend port (default: 8080): " PORT
 PORT=${PORT:-8080}
 
+read -p "Enter number of workers (default: 4): " WORKERS
+WORKERS=${WORKERS:-4}
+
+read -p "Enter max requests per worker (default: 1000): " MAX_REQUESTS
+MAX_REQUESTS=${MAX_REQUESTS:-1000}
+
 read -p "Enter your domain (e.g., example.com): " DOMAIN
 if [ -z "$DOMAIN" ]; then
     echo "❌ Domain is required!"
@@ -27,10 +33,12 @@ if [ -z "$PHP_BIN" ]; then
 fi
 echo "✅ PHP found at $PHP_BIN"
 
+PHP_VERSION=$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')
+
 # systemd
 SYSTEMCTL_BIN=$(which systemctl)
 if [ -z "$SYSTEMCTL_BIN" ]; then
-    echo "❌ systemd/systemctl not found. Daemon setup won't work."
+    echo "❌ systemd/systemctl not found."
     DAEMON_SUPPORT=false
 else
     DAEMON_SUPPORT=true
@@ -53,10 +61,38 @@ if [ -z "$CERTBOT_BIN" ]; then
 fi
 echo "✅ Certbot installed"
 
+# OPcache aktif et
+echo "⚡ Enabling OPcache for CLI..."
+PHP_INI="/etc/php/$PHP_VERSION/cli/php.ini"
+if [ -f "$PHP_INI" ]; then
+    sudo sed -i 's/;opcache.enable=.*/opcache.enable=1/' $PHP_INI
+    sudo sed -i 's/;opcache.enable_cli=.*/opcache.enable_cli=1/' $PHP_INI
+    sudo sed -i 's/;opcache.memory_consumption=.*/opcache.memory_consumption=128/' $PHP_INI
+    sudo sed -i 's/;opcache.interned_strings_buffer=.*/opcache.interned_strings_buffer=8/' $PHP_INI
+    sudo sed -i 's/;opcache.max_accelerated_files=.*/opcache.max_accelerated_files=10000/' $PHP_INI
+    sudo sed -i 's/;opcache.revalidate_freq=.*/opcache.revalidate_freq=0/' $PHP_INI
+    sudo sed -i 's/;opcache.validate_timestamps=.*/opcache.validate_timestamps=0/' $PHP_INI
+
+    # Eğer satır yoksa ekle
+    grep -q "opcache.enable_cli" $PHP_INI || echo "
+[opcache]
+opcache.enable=1
+opcache.enable_cli=1
+opcache.memory_consumption=128
+opcache.interned_strings_buffer=8
+opcache.max_accelerated_files=10000
+opcache.revalidate_freq=0
+opcache.validate_timestamps=0" | sudo tee -a $PHP_INI > /dev/null
+
+    echo "✅ OPcache enabled"
+else
+    echo "⚠️ php.ini not found at $PHP_INI, skipping OPcache"
+fi
+
 # App dizini
 echo "📁 Creating app directory: $APP_DIR"
 sudo mkdir -p $APP_DIR
-sudo cp -r . $APP_DIR
+sudo cp -rf . $APP_DIR
 sudo chown -R www-data:www-data $APP_DIR
 
 # ACME challenge dizini
@@ -81,7 +117,7 @@ Description=Mini PHP App Server ($APP_NAME)
 After=network.target
 
 [Service]
-ExecStart=$PHP_BIN $APP_DIR/server.php $PORT
+ExecStart=$PHP_BIN $APP_DIR/server.php $PORT $WORKERS $MAX_REQUESTS
 WorkingDirectory=$APP_DIR
 Restart=always
 User=www-data
@@ -94,9 +130,9 @@ EOL
     sudo systemctl daemon-reload
     sudo systemctl enable $SERVICE_NAME
     sudo systemctl restart $SERVICE_NAME
-    echo "✅ Service started. Check status: sudo systemctl status $SERVICE_NAME"
+    echo "✅ Service started. Check: sudo systemctl status $SERVICE_NAME"
 else
-    echo "⚠️ Daemon setup skipped. Run manually: php $APP_DIR/server.php $PORT"
+    echo "⚠️ Daemon setup skipped. Run manually: php $APP_DIR/server.php $PORT $WORKERS $MAX_REQUESTS"
 fi
 
 # Nginx config
@@ -147,11 +183,11 @@ server {
 EOL
 
 # options-ssl-nginx.conf içinde session tickets'ı aç
-sudo sed -i 's/ssl_session_tickets off/ssl_session_tickets on/' /etc/letsencrypt/options-ssl-nginx.conf
+sudo sed -i 's/ssl_session_tickets off/ssl_session_tickets on/' /etc/letsencrypt/options-ssl-nginx.conf 2>/dev/null || true
 
 sudo ln -sf $NGINX_CONF /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl restart nginx
-echo "✅ Nginx configured"
+echo "✅ Nginx configured for $DOMAIN"
 
 # SSL
 echo "🔒 Obtaining SSL certificate..."
@@ -159,4 +195,10 @@ sudo certbot --nginx -d $DOMAIN -d www.$DOMAIN --non-interactive --agree-tos -m 
 
 sudo systemctl reload nginx
 
+echo ""
 echo "🔥 Done! Your app is running at https://$DOMAIN"
+echo ""
+echo "Useful commands:"
+echo "  sudo systemctl status $SERVICE_NAME"
+echo "  sudo systemctl restart $SERVICE_NAME"
+echo "  sudo journalctl -u $SERVICE_NAME -f"

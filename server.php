@@ -220,7 +220,7 @@ for ($i = 0; $i < $workers; $i++) {
             foreach ($readSockets as $sock) {
                 // Yeni bağlantı
                 if ($sock === $server) {
-                    $conn = stream_socket_accept($server, 0);
+                    $conn = @stream_socket_accept($server, 0);
                     if ($conn) {
                         stream_set_blocking($conn, false);
                         $key               = (int) $conn;
