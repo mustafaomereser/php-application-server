@@ -4,23 +4,10 @@ require 'App.php';
 
 $host        = "0.0.0.0";
 $port        = $argv[1] ?? 8080;
-$workers     = $argv[2] ?? 20;
+$workers     = $argv[2] ?? 4;
 $maxRequests = $argv[3] ?? 1000;
 
-$server = stream_socket_server(
-    "tcp://$host:$port",
-    $errno,
-    $errstr,
-    STREAM_SERVER_BIND | STREAM_SERVER_LISTEN
-);
-
-if (!$server) {
-    die("❌ Socket error: $errstr ($errno)\n");
-}
-
-stream_set_blocking($server, false);
-
-echo "🚀 Server started on http://$host:$port (workers: $workers, maxRequests: $maxRequests)\n";
+echo "🚀 Server starting on http://$host:$port (workers: $workers, maxRequests: $maxRequests)\n";
 
 function read_request($sock): string
 {
@@ -28,8 +15,7 @@ function read_request($sock): string
     $start = microtime(true);
 
     while (true) {
-        $r = [$sock];
-        $w = $e = [];
+        $r = [$sock]; $w = $e = [];
         if (!stream_select($r, $w, $e, 0, 1000)) break;
 
         $chunk = fread($sock, 65536);
@@ -82,7 +68,6 @@ function parse_request_raw(string $raw): object
 
     $contentType = $headers['content-type'] ?? '';
 
-    // Superglobals — global scope'ta set et
     global $_GET, $_POST, $_FILES, $_REQUEST, $_SERVER;
 
     $_GET   = $query;
@@ -198,31 +183,51 @@ function reset_superglobals(): void
     $_GET = $_POST = $_FILES = $_REQUEST = $_SERVER = [];
 }
 
+// App'i fork öncesi bir kez boot et
+$app = new App();
 
-$app = new App(); // once boot
 for ($i = 0; $i < $workers; $i++) {
     if (pcntl_fork() === 0) {
-        // $app = new App(); // boot for every worker
-
         define('WORKER_ID', $i);
+
+        // SO_REUSEPORT — her worker kendi socket'ini açıyor
+        // kernel load balance yapıyor, thundering herd yok
+        $context = stream_context_create([
+            'socket' => [
+                'so_reuseport' => true,
+                'so_reuseaddr' => true,
+            ]
+        ]);
+
+        $server = stream_socket_server(
+            "tcp://$host:$port",
+            $errno,
+            $errstr,
+            STREAM_SERVER_BIND | STREAM_SERVER_LISTEN,
+            $context
+        );
+
+        if (!$server) {
+            die("❌ Worker #$i socket error: $errstr ($errno)\n");
+        }
+
+        stream_set_blocking($server, false);
+
         echo "👷 Worker #$i started (PID: " . getmypid() . ")\n";
 
-        $connections  = []; // [socket_int_key => ['socket' => resource, 'time' => int]]
-        $socketMap    = []; // stream_select sonuçlarını hızlı lookup için
+        $connections  = [];
+        $socketMap    = [];
         $requestCount = 0;
         $lastCleanup  = time();
 
         while (true) {
-            // stream_select için socket listesi — socketMap'ten al
             $readSockets = array_merge([$server], array_values($socketMap));
             $w = $e = [];
 
-            // Bağlantı varsa 0 timeout (hızlı dön), yoksa 100ms bekle
             $tv = empty($socketMap) ? 100000 : 0;
             if (stream_select($readSockets, $w, $e, 0, $tv) === false) continue;
 
             foreach ($readSockets as $sock) {
-                // Yeni bağlantı
                 if ($sock === $server) {
                     $conn = @stream_socket_accept($server, 0);
                     if ($conn) {
@@ -248,7 +253,7 @@ for ($i = 0; $i < $workers; $i++) {
                 try {
                     $req       = parse_request_raw($data);
                     $keepAlive = strtolower($req->headers['connection'] ?? 'keep-alive') !== 'close'
-                        && !isset($req->query['_close']);
+                                 && !isset($req->query['_close']);
 
                     $res = $app->handle($req, $keepAlive);
                     fwrite($sock, $res);
@@ -261,13 +266,12 @@ for ($i = 0; $i < $workers; $i++) {
                     }
                 } catch (\Throwable $ex) {
                     $error = "500 Internal Server Error\n" . $ex->getMessage();
-                    fwrite(
-                        $sock,
+                    fwrite($sock,
                         "HTTP/1.1 500 Internal Server Error\r\n" .
-                            "Content-Type: text/plain\r\n" .
-                            "Connection: close\r\n" .
-                            "Content-Length: " . strlen($error) . "\r\n\r\n" .
-                            $error
+                        "Content-Type: text/plain\r\n" .
+                        "Connection: close\r\n" .
+                        "Content-Length: " . strlen($error) . "\r\n\r\n" .
+                        $error
                     );
                     @fclose($sock);
                     unset($connections[$key], $socketMap[$key]);
@@ -285,7 +289,7 @@ for ($i = 0; $i < $workers; $i++) {
                 }
             }
 
-            // Her 5 saniyede bir idle bağlantıları temizle
+            // Her 5 saniyede idle bağlantıları temizle
             $now = time();
             if ($now - $lastCleanup >= 5) {
                 foreach ($connections as $key => $c) {
