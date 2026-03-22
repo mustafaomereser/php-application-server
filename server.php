@@ -4,7 +4,7 @@ require 'App.php';
 
 $host        = "0.0.0.0";
 $port        = $argv[1] ?? 8080;
-$workers     = $argv[2] ?? 20;
+$workers     = $argv[2] ?? 4;
 $maxRequests = $argv[3] ?? 1000;
 
 $server = stream_socket_server(
@@ -29,7 +29,7 @@ function read_request($sock): string
 
     while (true) {
         $r = [$sock]; $w = $e = [];
-        if (!stream_select($r, $w, $e, 0, 1000)) break; // 1ms timeout
+        if (!stream_select($r, $w, $e, 0, 1000)) break;
 
         $chunk = fread($sock, 65536);
         if ($chunk === false || $chunk === '') break;
@@ -38,13 +38,13 @@ function read_request($sock): string
 
         if (str_contains($data, "\r\n\r\n")) {
             preg_match('/Content-Length:\s*(\d+)/i', $data, $cl);
-            if (!$cl) break; // GET - body yok
+            if (!$cl) break;
 
             [, $body] = explode("\r\n\r\n", $data, 2);
-            if (strlen($body) >= (int) $cl[1]) break; // body tamam
+            if (strlen($body) >= (int) $cl[1]) break;
         }
 
-        if ((microtime(true) - $start) > 30) break; // 30s hard limit
+        if ((microtime(true) - $start) > 30) break;
     }
 
     return $data;
@@ -58,9 +58,8 @@ function parse_request_raw(string $raw): object
     $fullUri = $m[2] ?? '/';
     $version = $m[3] ?? '1.1';
 
-    $headers     = [];
-    $headerLines = explode("\r\n", $raw);
-    foreach (array_slice($headerLines, 1) as $line) {
+    $headers = [];
+    foreach (array_slice(explode("\r\n", $raw), 1) as $line) {
         if ($line === '') break;
         if (!str_contains($line, ': ')) continue;
         [$k, $v]              = explode(': ', $line, 2);
@@ -78,9 +77,7 @@ function parse_request_raw(string $raw): object
     if (str_contains($raw, "\r\n\r\n")) {
         [, $body] = explode("\r\n\r\n", $raw, 2);
         $contentLength = (int) ($headers['content-length'] ?? 0);
-        if ($contentLength > 0) {
-            $body = substr($body, 0, $contentLength);
-        }
+        if ($contentLength > 0) $body = substr($body, 0, $contentLength);
     }
 
     $contentType = $headers['content-type'] ?? '';
@@ -97,10 +94,7 @@ function parse_request_raw(string $raw): object
             if (is_array($decoded)) $_POST = $decoded;
         } elseif (str_contains($contentType, 'multipart/form-data')) {
             preg_match('/boundary=([^\s;]+)/', $contentType, $bm);
-            $boundary = $bm[1] ?? '';
-            if ($boundary) {
-                parse_multipart($body, $boundary, $_POST, $_FILES);
-            }
+            if ($bm[1] ?? '') parse_multipart($body, $bm[1], $_POST, $_FILES);
         }
     }
 
@@ -123,8 +117,7 @@ function parse_request_raw(string $raw): object
     ];
 
     foreach ($headers as $k => $v) {
-        $key           = 'HTTP_' . strtoupper(str_replace('-', '_', $k));
-        $_SERVER[$key] = $v;
+        $_SERVER['HTTP_' . strtoupper(str_replace('-', '_', $k))] = $v;
     }
 
     return (object) [
@@ -140,9 +133,7 @@ function parse_request_raw(string $raw): object
 
 function parse_multipart(string $body, string $boundary, array &$post, array &$files): void
 {
-    $boundary = '--' . $boundary;
-    $parts    = explode($boundary, $body);
-
+    $parts = explode('--' . $boundary, $body);
     array_shift($parts);
     array_pop($parts);
 
@@ -165,43 +156,27 @@ function parse_multipart(string $body, string $boundary, array &$post, array &$f
 
         if ($filename !== '') {
             preg_match('/Content-Type:\s*([^\r\n]+)/i', $partHeaders, $ctm);
-            $mimeType = trim($ctm[1] ?? 'application/octet-stream');
-
             $tmpFile = tempnam(sys_get_temp_dir(), 'php_upload_');
             file_put_contents($tmpFile, $partBody);
 
             $fileEntry = [
                 'name'     => $filename,
-                'type'     => $mimeType,
+                'type'     => trim($ctm[1] ?? 'application/octet-stream'),
                 'tmp_name' => $tmpFile,
                 'error'    => UPLOAD_ERR_OK,
                 'size'     => strlen($partBody),
             ];
 
             if ($isArray) {
-                foreach ($fileEntry as $k => $v) {
-                    $files[$baseName][$k][] = $v;
-                }
+                foreach ($fileEntry as $k => $v) $files[$baseName][$k][] = $v;
             } else {
                 $files[$baseName] = $fileEntry;
             }
         } else {
-            if ($isArray) {
-                $post[$baseName][] = $partBody;
-            } else {
-                $post[$name] = $partBody;
-            }
+            if ($isArray) $post[$baseName][] = $partBody;
+            else $post[$name] = $partBody;
         }
     }
-}
-
-function reset_superglobals(): void
-{
-    $_GET     = [];
-    $_POST    = [];
-    $_FILES   = [];
-    $_REQUEST = [];
-    $_SERVER  = [];
 }
 
 function cleanup_tmp_files(): void
@@ -213,61 +188,101 @@ function cleanup_tmp_files(): void
     }
 }
 
+function reset_superglobals(): void
+{
+    $_GET = $_POST = $_FILES = $_REQUEST = $_SERVER = [];
+}
+
 for ($i = 0; $i < $workers; $i++) {
     if (pcntl_fork() === 0) {
         define('WORKER_ID', $i);
         echo "👷 Worker #$i started (PID: " . getmypid() . ")\n";
 
         $app          = new App();
+        $connections  = [];  // keep-alive bağlantı havuzu
         $requestCount = 0;
 
         while (true) {
-            // Her worker sadece 1 bağlantıya odaklanıyor
-            $r = [$server]; $w = $e = [];
-            stream_select($r, $w, $e, null);
+            // Hem server socket hem de keep-alive bağlantıları dinle
+            $readSockets = array_merge([$server], $connections);
+            $w = $e = [];
 
-            $conn = stream_socket_accept($server, 0);
-            if (!$conn) continue;
+            if (stream_select($readSockets, $w, $e, 0, 100000) === false) continue; // 100ms
 
-            stream_set_blocking($conn, false);
-
-            $data = read_request($conn);
-
-            if (!$data) {
-                fclose($conn);
-                continue;
-            }
-
-            try {
-                $req       = parse_request_raw($data);
-                $keepAlive = strtolower($req->headers['connection'] ?? 'keep-alive') !== 'close';
-
-                $res = $app->handle($req, $keepAlive);
-                fwrite($conn, $res);
-
-                if (!$keepAlive) {
-                    fclose($conn);
+            foreach ($readSockets as $sock) {
+                // Yeni bağlantı
+                if ($sock === $server) {
+                    $conn = stream_socket_accept($server, 0);
+                    if ($conn) {
+                        stream_set_blocking($conn, false);
+                        $connections[(int) $conn] = [
+                            'socket' => $conn,
+                            'time'   => time(),
+                        ];
+                    }
+                    continue;
                 }
-            } catch (\Throwable $e) {
-                $error = "500 Internal Server Error\n" . $e->getMessage();
-                fwrite($conn,
-                    "HTTP/1.1 500 Internal Server Error\r\n" .
-                    "Content-Type: text/plain\r\n" .
-                    "Connection: close\r\n" .
-                    "Content-Length: " . strlen($error) . "\r\n\r\n" .
-                    $error
-                );
-                fclose($conn);
-            } finally {
-                cleanup_tmp_files();
-                reset_superglobals();
-                $app->reset();
+
+                // Mevcut keep-alive bağlantıdan yeni istek
+                $connData = $connections[(int) $sock] ?? null;
+                if (!$connData) continue;
+                $conn = $connData['socket'];
+
+                $data = read_request($conn);
+
+                if (!$data) {
+                    fclose($conn);
+                    unset($connections[(int) $conn]);
+                    continue;
+                }
+
+                try {
+                    $req       = parse_request_raw($data);
+                    $keepAlive = strtolower($req->headers['connection'] ?? 'keep-alive') !== 'close';
+
+                    $res = $app->handle($req, $keepAlive);
+                    fwrite($conn, $res);
+
+                    if ($keepAlive) {
+                        // Bağlantıyı havuzda tut, last activity güncelle
+                        $connections[(int) $conn]['time'] = time();
+                    } else {
+                        fclose($conn);
+                        unset($connections[(int) $conn]);
+                    }
+                } catch (\Throwable $ex) {
+                    $error = "500 Internal Server Error\n" . $ex->getMessage();
+                    fwrite($conn,
+                        "HTTP/1.1 500 Internal Server Error\r\n" .
+                        "Content-Type: text/plain\r\n" .
+                        "Connection: close\r\n" .
+                        "Content-Length: " . strlen($error) . "\r\n\r\n" .
+                        $error
+                    );
+                    fclose($conn);
+                    unset($connections[(int) $conn]);
+                } finally {
+                    cleanup_tmp_files();
+                    reset_superglobals();
+                    $app->reset();
+                }
+
+                $requestCount++;
+                if ($requestCount >= $maxRequests) {
+                    echo "♻️ Worker #$i restarting after $maxRequests requests\n";
+                    // Açık bağlantıları kapat
+                    foreach ($connections as $c) fclose($c['socket']);
+                    exit;
+                }
             }
 
-            $requestCount++;
-            if ($requestCount >= $maxRequests) {
-                echo "♻️ Worker #$i restarting after $maxRequests requests\n";
-                exit;
+            // Keep-alive timeout — 5 saniye idle bağlantıları kapat
+            $now = time();
+            foreach ($connections as $key => $c) {
+                if (($now - $c['time']) > 5) {
+                    fclose($c['socket']);
+                    unset($connections[$key]);
+                }
             }
         }
 
