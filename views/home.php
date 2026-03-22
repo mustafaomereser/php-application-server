@@ -645,7 +645,7 @@
 
             try {
                 const t0 = performance.now();
-                const r = await fetch('/test-upload', {
+                const r = await fetch('/test-upload?_close=1', {
                     method: 'POST',
                     body: fd,
                     headers: {
