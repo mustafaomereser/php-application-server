@@ -538,11 +538,9 @@
             const el = document.getElementById('ttfb-results');
             el.innerHTML = '';
 
-            const headers = keepAlive ?
-                {} :
-                {
-                    'Connection': 'close'
-                };
+            const headers = keepAlive ? {} : {
+                'Connection': 'close'
+            };
 
             const requests = Array.from({
                 length: count
@@ -649,7 +647,10 @@
                 const t0 = performance.now();
                 const r = await fetch('/test-upload', {
                     method: 'POST',
-                    body: fd
+                    body: fd,
+                    headers: {
+                        'Connection': 'close'
+                    }
                 });
                 const ms = performance.now() - t0;
                 const txt = await r.text();

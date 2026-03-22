@@ -15,8 +15,7 @@ function read_request($sock): string
     $start = microtime(true);
 
     while (true) {
-        $r = [$sock];
-        $w = $e = [];
+        $r = [$sock]; $w = $e = [];
         if (!stream_select($r, $w, $e, 0, 1000)) break;
 
         $chunk = fread($sock, 65536);
@@ -26,10 +25,10 @@ function read_request($sock): string
 
         if (str_contains($data, "\r\n\r\n")) {
             preg_match('/Content-Length:\s*(\d+)/i', $data, $cl);
-            if (!$cl) break; // GET, body yok
+            if (!$cl) break;
 
             [, $bodyPart] = explode("\r\n\r\n", $data, 2);
-            if (strlen($bodyPart) >= (int) $cl[1]) break; // body tamam
+            if (strlen($bodyPart) >= (int) $cl[1]) break;
         }
 
         if ((microtime(true) - $start) > 30) break;
@@ -46,24 +45,24 @@ function parse_request_raw(string $raw): object
     $fullUri = $m[2] ?? '/';
     $version = $m[3] ?? '1.1';
 
-    // Headers
-    $headers     = [];
-    $headerPart  = $raw;
-    $bodyPart    = '';
-
+    // Header ve body'yi ayır
+    $headerPart = $raw;
+    $bodyPart   = '';
     if (str_contains($raw, "\r\n\r\n")) {
         [$headerPart, $bodyPart] = explode("\r\n\r\n", $raw, 2);
     }
 
+    // Headers
+    $headers = [];
     foreach (explode("\r\n", $headerPart) as $line) {
         if (!str_contains($line, ': ')) continue;
         [$k, $v]              = explode(': ', $line, 2);
         $headers[strtolower($k)] = $v;
     }
 
-    // Content-Length'e göre body'yi kes
+    // Body — Content-Length'e göre kes
     $contentLength = (int) ($headers['content-length'] ?? 0);
-    $body          = $contentLength > 0 ? substr($bodyPart, 0, $contentLength) : $bodyPart;
+    $body          = $contentLength > 0 ? substr($bodyPart, 0, $contentLength) : '';
 
     // URI ve query string
     $uri   = $fullUri;
@@ -88,7 +87,6 @@ function parse_request_raw(string $raw): object
             $decoded = json_decode($body, true);
             if (is_array($decoded)) $_POST = $decoded;
         } elseif (str_contains($contentType, 'multipart/form-data')) {
-            // Boundary'yi tırnaklı veya tırnaksız al
             preg_match('/boundary=([^\s;]+)/i', $contentType, $bm);
             if (!empty($bm[1])) {
                 parse_multipart($body, $bm[1], $_POST, $_FILES);
@@ -131,55 +129,66 @@ function parse_request_raw(string $raw): object
 
 function parse_multipart(string $body, string $boundary, array &$post, array &$files): void
 {
-    // Body'deki gerçek delimiter'ı bul (-- + boundary)
-    // Boundary header'da tırnaksız gelir, body'de -- prefix'li gelir
     $delimiter = '--' . $boundary;
+    $parts     = explode($delimiter, $body);
 
-    $parts = explode($delimiter, $body);
-    array_shift($parts); // ilk boş parça
-    array_pop($parts);   // son -- parça
+    // İlk boş + son -- parçasını at
+    array_shift($parts);
+    array_pop($parts);
 
     foreach ($parts as $part) {
+        // \r\n ile başlıyorsa temizle
         $part = ltrim($part, "\r\n");
 
-        // Son boundary parçası
+        // Son boundary işareti
         if (str_starts_with($part, '--')) continue;
         if (!str_contains($part, "\r\n\r\n")) continue;
 
         [$partHeaders, $partBody] = explode("\r\n\r\n", $part, 2);
         $partBody = rtrim($partBody, "\r\n");
 
-        preg_match('/Content-Disposition:[^\r\n]*name="([^"]+)"/i', $partHeaders, $nm);
+        // name
+        preg_match('/Content-Disposition:[^\r\n]*;\s*name="([^"]+)"/i', $partHeaders, $nm);
         $name = $nm[1] ?? '';
         if (!$name) continue;
 
-        preg_match('/filename="([^"]*)"/i', $partHeaders, $fm);
+        // filename
+        preg_match('/;\s*filename="([^"]*)"/i', $partHeaders, $fm);
         $filename = $fm[1] ?? '';
 
-        $isArray  = str_ends_with($name, '[]') || preg_match('/\[\d*\]$/', $name);
+        // files[] veya files[0] gibi array field mi?
+        $isArray  = str_ends_with($name, '[]') || preg_match('/\[(\d*)\]$/', $name);
         $baseName = $isArray ? preg_replace('/\[\d*\]$|\[\]$/', '', $name) : $name;
 
         if ($filename !== '') {
             preg_match('/Content-Type:\s*([^\r\n]+)/i', $partHeaders, $ctm);
+            $mimeType = trim($ctm[1] ?? 'application/octet-stream');
+
             $tmpFile = tempnam(sys_get_temp_dir(), 'php_upload_');
             file_put_contents($tmpFile, $partBody);
 
-            $fileEntry = [
-                'name'     => $filename,
-                'type'     => trim($ctm[1] ?? 'application/octet-stream'),
-                'tmp_name' => $tmpFile,
-                'error'    => UPLOAD_ERR_OK,
-                'size'     => strlen($partBody),
-            ];
-
             if ($isArray) {
-                foreach ($fileEntry as $k => $v) $files[$baseName][$k][] = $v;
+                // PHP standart $_FILES array formatı
+                $files[$baseName]['name'][]     = $filename;
+                $files[$baseName]['type'][]     = $mimeType;
+                $files[$baseName]['tmp_name'][] = $tmpFile;
+                $files[$baseName]['error'][]    = UPLOAD_ERR_OK;
+                $files[$baseName]['size'][]     = strlen($partBody);
             } else {
-                $files[$baseName] = $fileEntry;
+                $files[$baseName] = [
+                    'name'     => $filename,
+                    'type'     => $mimeType,
+                    'tmp_name' => $tmpFile,
+                    'error'    => UPLOAD_ERR_OK,
+                    'size'     => strlen($partBody),
+                ];
             }
         } else {
-            if ($isArray) $post[$baseName][] = $partBody;
-            else $post[$name] = $partBody;
+            if ($isArray) {
+                $post[$baseName][] = $partBody;
+            } else {
+                $post[$name] = $partBody;
+            }
         }
     }
 }
@@ -188,7 +197,11 @@ function cleanup_tmp_files(): void
 {
     global $_FILES;
     foreach ($_FILES as $file) {
-        if (!empty($file['tmp_name']) && file_exists($file['tmp_name'])) {
+        if (is_array($file['tmp_name'])) {
+            foreach ($file['tmp_name'] as $tmp) {
+                if ($tmp && file_exists($tmp)) unlink($tmp);
+            }
+        } elseif (!empty($file['tmp_name']) && file_exists($file['tmp_name'])) {
             unlink($file['tmp_name']);
         }
     }
@@ -207,7 +220,6 @@ for ($i = 0; $i < $workers; $i++) {
     if (pcntl_fork() === 0) {
         define('WORKER_ID', $i);
 
-        // SO_REUSEPORT — her worker kendi socket'ini açıyor
         $context = stream_context_create([
             'socket' => [
                 'so_reuseport' => true,
@@ -228,7 +240,6 @@ for ($i = 0; $i < $workers; $i++) {
         }
 
         stream_set_blocking($server, false);
-
         echo "👷 Worker #$i started (PID: " . getmypid() . ")\n";
 
         $connections  = [];
@@ -244,6 +255,7 @@ for ($i = 0; $i < $workers; $i++) {
             if (stream_select($readSockets, $w, $e, 0, $tv) === false) continue;
 
             foreach ($readSockets as $sock) {
+                // Yeni bağlantı
                 if ($sock === $server) {
                     $conn = @stream_socket_accept($server, 0);
                     if ($conn) {
@@ -269,7 +281,7 @@ for ($i = 0; $i < $workers; $i++) {
                 try {
                     $req       = parse_request_raw($data);
                     $keepAlive = strtolower($req->headers['connection'] ?? 'keep-alive') !== 'close'
-                        && !isset($req->query['_close']);
+                                 && !isset($req->query['_close']);
 
                     $res = $app->handle($req, $keepAlive);
                     fwrite($sock, $res);
@@ -282,13 +294,12 @@ for ($i = 0; $i < $workers; $i++) {
                     }
                 } catch (\Throwable $ex) {
                     $error = "500 Internal Server Error\n" . $ex->getMessage();
-                    fwrite(
-                        $sock,
+                    fwrite($sock,
                         "HTTP/1.1 500 Internal Server Error\r\n" .
-                            "Content-Type: text/plain\r\n" .
-                            "Connection: close\r\n" .
-                            "Content-Length: " . strlen($error) . "\r\n\r\n" .
-                            $error
+                        "Content-Type: text/plain\r\n" .
+                        "Connection: close\r\n" .
+                        "Content-Length: " . strlen($error) . "\r\n\r\n" .
+                        $error
                     );
                     @fclose($sock);
                     unset($connections[$key], $socketMap[$key]);
