@@ -60,7 +60,8 @@ function read_request($sock): string
     $data = '';
 
     while (true) {
-        $r = [$sock]; $w = $e = [];
+        $r = [$sock];
+        $w = $e = [];
         if (!stream_select($r, $w, $e, 0, 5000)) break;
 
         $chunk = fread($sock, 8192);
@@ -115,7 +116,7 @@ for ($i = 0; $i < $workers; $i++) {
 
                 try {
                     $req       = parse_request_raw($data);
-                    $keepAlive = strtolower($req->headers['connection'] ?? '') === 'keep-alive';
+                    $keepAlive = strtolower($req->headers['connection'] ?? 'keep-alive') !== 'close';
 
                     $res = $app->handle($req, $keepAlive);
 
@@ -127,12 +128,13 @@ for ($i = 0; $i < $workers; $i++) {
                     }
                 } catch (\Throwable $e) {
                     $error = "500 Internal Server Error\n" . $e->getMessage();
-                    fwrite($sock,
+                    fwrite(
+                        $sock,
                         "HTTP/1.1 500 Internal Server Error\r\n" .
-                        "Content-Type: text/plain\r\n" .
-                        "Connection: close\r\n" .
-                        "Content-Length: " . strlen($error) . "\r\n\r\n" .
-                        $error
+                            "Content-Type: text/plain\r\n" .
+                            "Connection: close\r\n" .
+                            "Content-Length: " . strlen($error) . "\r\n\r\n" .
+                            $error
                     );
                     fclose($sock);
                     unset($connections[(int) $sock]);
