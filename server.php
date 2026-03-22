@@ -119,19 +119,22 @@ function parse_request_raw(string $raw): object
         'contentType' => $contentType,
     ];
 }
-
 function parse_multipart(string $body, string $boundary, array &$post, array &$files): void
 {
-    $boundary = ltrim($boundary, '-');
-    $parts    = explode('--' . $boundary, $body);
-    array_shift($parts);
-    array_pop($parts);
+    // Body'deki ilk boundary satırını bul, onu kullan
+    preg_match('/^(--[^\r\n]+)/', $body, $bm);
+    $delimiter = $bm[1] ?? ('--' . $boundary);
+
+    $parts = explode($delimiter, $body);
+    array_shift($parts); // ilk boş parça
+    array_pop($parts);   // son -- parça
 
     foreach ($parts as $part) {
-        if (str_starts_with($part, '--')) continue;
+        $part = ltrim($part, "\r\n");
+        if ($part === '' || $part === '--' || str_starts_with($part, '--')) continue;
         if (!str_contains($part, "\r\n\r\n")) continue;
 
-        [$partHeaders, $partBody] = explode("\r\n\r\n", ltrim($part, "\r\n"), 2);
+        [$partHeaders, $partBody] = explode("\r\n\r\n", $part, 2);
         $partBody = rtrim($partBody, "\r\n");
 
         preg_match('/Content-Disposition:[^\r\n]*name="([^"]+)"/', $partHeaders, $nm);
