@@ -35,6 +35,11 @@ echo "✅ PHP found at $PHP_BIN"
 
 PHP_VERSION=$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')
 
+# PHP OPcache extension
+echo "⚡ Installing PHP OPcache extension..."
+sudo apt install php$PHP_VERSION-opcache -y
+echo "✅ OPcache extension installed"
+
 # systemd
 SYSTEMCTL_BIN=$(which systemctl)
 if [ -z "$SYSTEMCTL_BIN" ]; then
