@@ -14,3 +14,17 @@ wait
 
 ---
 sudo journalctl -u myphpapp -n 20
+
+
+---
+# summary
+watch -n 1 'ps aux | grep "server.php" | grep -v grep'
+
+#with htop
+Open htop after installing:
+sudo apt install htop -y
+htop
+
+Press F4 → type php to filter only PHP workers
+Each worker's CPU, RAM, PID shown separately
+Press F2 → Display options → enable Tree view to see parent-child relationship
