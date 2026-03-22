@@ -1,54 +1,66 @@
 #!/bin/bash
 
-# Ask user for app name and port
+echo "🚀 Starting full automatic setup..."
+
+# Ask user for inputs
 read -p "Enter app name (default: myphpapp): " APP_NAME
 APP_NAME=${APP_NAME:-myphpapp}
 
-read -p "Enter port (default: 8080): " PORT
+read -p "Enter backend port (default: 8080): " PORT
 PORT=${PORT:-8080}
+
+read -p "Enter your domain (e.g., example.com): " DOMAIN
+if [ -z "$DOMAIN" ]; then
+    echo "❌ Domain is required!"
+    exit 1
+fi
 
 APP_DIR="/var/www/$APP_NAME"
 SERVICE_NAME="$APP_NAME"
-PHP_BIN=$(which php)
-SYSTEMCTL_BIN=$(which systemctl)
-NGINX_BIN=$(which nginx)
-
-echo "Starting installation..."
-echo "App Name: $APP_NAME"
-echo "Port: $PORT"
 
 # Check PHP
+PHP_BIN=$(which php)
 if [ -z "$PHP_BIN" ]; then
-    echo "❌ PHP not found. Please install PHP first."
-    exit 1
+    echo "⚠️ PHP not found. Installing..."
+    sudo apt update
+    sudo apt install php-cli -y
+    PHP_BIN=$(which php)
 fi
 echo "✅ PHP found at $PHP_BIN"
 
-# Check systemctl (daemon support)
+# Check systemd
+SYSTEMCTL_BIN=$(which systemctl)
 if [ -z "$SYSTEMCTL_BIN" ]; then
     echo "❌ systemd/systemctl not found. Daemon setup won't work."
     DAEMON_SUPPORT=false
 else
-    echo "✅ systemd found"
     DAEMON_SUPPORT=true
+    echo "✅ systemd found"
 fi
 
-# Optional Nginx check
+# Install Nginx
+NGINX_BIN=$(which nginx)
 if [ -z "$NGINX_BIN" ]; then
-    echo "⚠️ Nginx not found. Reverse proxy won't be available."
-    NGINX_SUPPORT=false
-else
-    echo "✅ Nginx found"
-    NGINX_SUPPORT=true
+    echo "⚠️ Nginx not found. Installing..."
+    sudo apt install nginx -y
 fi
+echo "✅ Nginx installed"
 
-# Create application directory
+# Install Certbot
+CERTBOT_BIN=$(which certbot)
+if [ -z "$CERTBOT_BIN" ]; then
+    echo "⚠️ Certbot not found. Installing..."
+    sudo apt install certbot python3-certbot-nginx -y
+fi
+echo "✅ Certbot installed"
+
+# Create app directory
 echo "📁 Creating app directory: $APP_DIR"
 sudo mkdir -p $APP_DIR
 sudo cp -r . $APP_DIR
 sudo chown -R www-data:www-data $APP_DIR
 
-# Create systemd service if available
+# Create systemd service
 if [ "$DAEMON_SUPPORT" = true ]; then
     echo "⚙️ Creating systemd service..."
     SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
@@ -73,20 +85,15 @@ EOL
     sudo systemctl restart $SERVICE_NAME
     echo "✅ Service started. Check status: sudo systemctl status $SERVICE_NAME"
 else
-    echo "⚠️ Daemon setup skipped. You can run manually: php $APP_DIR/server.php $PORT"
+    echo "⚠️ Daemon setup skipped. Run manually: php $APP_DIR/server.php $PORT"
 fi
 
-# Optional Nginx setup
-if [ "$NGINX_SUPPORT" = true ]; then
-    read -p "Do you want to set up Nginx reverse proxy? (y/n): " setup_nginx
-    if [ "$setup_nginx" == "y" ]; then
-        read -p "Enter your domain (e.g., site.com): " DOMAIN
-        NGINX_CONF="/etc/nginx/sites-available/$APP_NAME"
-
-        sudo bash -c "cat > $NGINX_CONF" <<EOL
+# Configure Nginx + Certbot
+NGINX_CONF="/etc/nginx/sites-available/$APP_NAME"
+sudo bash -c "cat > $NGINX_CONF" <<EOL
 server {
     listen 80;
-    server_name $DOMAIN;
+    server_name $DOMAIN www.$DOMAIN;
 
     location / {
         proxy_pass http://127.0.0.1:$PORT;
@@ -96,12 +103,15 @@ server {
 }
 EOL
 
-        sudo ln -sf $NGINX_CONF /etc/nginx/sites-enabled/
-        sudo nginx -t && sudo systemctl restart nginx
-        echo "✅ Nginx configured for $DOMAIN"
-    fi
-else
-    echo "⚠️ Skipping Nginx configuration because it's not installed."
-fi
+sudo ln -sf $NGINX_CONF /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl restart nginx
+echo "✅ Nginx configured for $DOMAIN on port 80"
 
-echo "🔥 Installation complete."
+# Obtain SSL automatically with Certbot
+sudo certbot --nginx -d $DOMAIN -d www.$DOMAIN --non-interactive --agree-tos -m admin@$DOMAIN
+echo "✅ SSL installed with Certbot, HTTPS enabled"
+
+# Reload Nginx to apply changes
+sudo systemctl reload nginx
+
+echo "🔥 Full installation complete! Your app is running at https://$DOMAIN"
