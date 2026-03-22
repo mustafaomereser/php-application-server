@@ -573,7 +573,7 @@
                 const cls = ms < 20 ? 'var(--accent)' : ms < 100 ? 'var(--warn)' : 'var(--danger)';
                 el.innerHTML += `
             <div class="ttfb-row">
-                <span>#${idx + 1} <span style="color:var(--muted)">w:${wid}</span></span>
+                <span>#${idx + 1} <span style="color:var(--muted)">w:${wid} - </span></span>
                 <span class="ttfb-val" style="color:${cls}">${ms.toFixed(2)}ms</span>
             </div>
             <div class="meter-wrap">
