@@ -1,3 +1,7 @@
+<<<<<<< HEAD
+=======
+---
+>>>>>>> c3f523c0d8fae5548d8c0287a2a88e543c8ea267
 # Mini PHP Application Server / Mini PHP Uygulama Sunucusu
 
 ## English Version
