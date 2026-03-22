@@ -4,7 +4,7 @@ require 'App.php';
 
 $host        = "0.0.0.0";
 $port        = $argv[1] ?? 8080;
-$workers     = $argv[2] ?? 20;
+$workers     = $argv[2] ?? 4;
 $maxRequests = $argv[3] ?? 1000;
 
 echo "🚀 Server starting on http://$host:$port (workers: $workers, maxRequests: $maxRequests)\n";
@@ -26,9 +26,10 @@ function read_request($sock): string
 
         if (str_contains($data, "\r\n\r\n")) {
             preg_match('/Content-Length:\s*(\d+)/i', $data, $cl);
-            if (!$cl) break;
-            [, $body] = explode("\r\n\r\n", $data, 2);
-            if (strlen($body) >= (int) $cl[1]) break;
+            if (!$cl) break; // GET, body yok
+
+            [, $bodyPart] = explode("\r\n\r\n", $data, 2);
+            if (strlen($bodyPart) >= (int) $cl[1]) break; // body tamam
         }
 
         if ((microtime(true) - $start) > 30) break;
@@ -45,26 +46,31 @@ function parse_request_raw(string $raw): object
     $fullUri = $m[2] ?? '/';
     $version = $m[3] ?? '1.1';
 
-    $headers = [];
-    foreach (array_slice(explode("\r\n", $raw), 1) as $line) {
-        if ($line === '') break;
+    // Headers
+    $headers     = [];
+    $headerPart  = $raw;
+    $bodyPart    = '';
+
+    if (str_contains($raw, "\r\n\r\n")) {
+        [$headerPart, $bodyPart] = explode("\r\n\r\n", $raw, 2);
+    }
+
+    foreach (explode("\r\n", $headerPart) as $line) {
         if (!str_contains($line, ': ')) continue;
         [$k, $v]              = explode(': ', $line, 2);
         $headers[strtolower($k)] = $v;
     }
 
+    // Content-Length'e göre body'yi kes
+    $contentLength = (int) ($headers['content-length'] ?? 0);
+    $body          = $contentLength > 0 ? substr($bodyPart, 0, $contentLength) : $bodyPart;
+
+    // URI ve query string
     $uri   = $fullUri;
     $query = [];
     if (str_contains($fullUri, '?')) {
         [$uri, $qs] = explode('?', $fullUri, 2);
         parse_str($qs, $query);
-    }
-
-    $body = '';
-    if (str_contains($raw, "\r\n\r\n")) {
-        [, $body] = explode("\r\n\r\n", $raw, 2);
-        $contentLength = (int) ($headers['content-length'] ?? 0);
-        if ($contentLength > 0) $body = substr($body, 0, $contentLength);
     }
 
     $contentType = $headers['content-type'] ?? '';
@@ -75,15 +81,18 @@ function parse_request_raw(string $raw): object
     $_POST  = [];
     $_FILES = [];
 
-    if ($method !== 'GET' && $method !== 'HEAD') {
+    if ($method !== 'GET' && $method !== 'HEAD' && $body !== '') {
         if (str_contains($contentType, 'application/x-www-form-urlencoded')) {
             parse_str($body, $_POST);
         } elseif (str_contains($contentType, 'application/json')) {
             $decoded = json_decode($body, true);
             if (is_array($decoded)) $_POST = $decoded;
         } elseif (str_contains($contentType, 'multipart/form-data')) {
-            preg_match('/boundary=([^\s;]+)/', $contentType, $bm);
-            if (!empty($bm[1])) parse_multipart($body, $bm[1], $_POST, $_FILES);
+            // Boundary'yi tırnaklı veya tırnaksız al
+            preg_match('/boundary=([^\s;]+)/i', $contentType, $bm);
+            if (!empty($bm[1])) {
+                parse_multipart($body, $bm[1], $_POST, $_FILES);
+            }
         }
     }
 
@@ -119,31 +128,32 @@ function parse_request_raw(string $raw): object
         'contentType' => $contentType,
     ];
 }
+
 function parse_multipart(string $body, string $boundary, array &$post, array &$files): void
 {
-    preg_match('/^(--[^\r\n]+)/', $body, $bm);
-    $delimiter = $bm[1] ?? ('--' . $boundary);
-
-    echo "BOUNDARY: $boundary\n";
-    echo "DELIMITER: $delimiter\n";
-    echo "BODY START: " . substr($body, 0, 100) . "\n";
+    // Body'deki gerçek delimiter'ı bul (-- + boundary)
+    // Boundary header'da tırnaksız gelir, body'de -- prefix'li gelir
+    $delimiter = '--' . $boundary;
 
     $parts = explode($delimiter, $body);
-    echo "PARTS COUNT: " . count($parts) . "\n";
+    array_shift($parts); // ilk boş parça
+    array_pop($parts);   // son -- parça
 
     foreach ($parts as $part) {
         $part = ltrim($part, "\r\n");
-        if ($part === '' || $part === '--' || str_starts_with($part, '--')) continue;
+
+        // Son boundary parçası
+        if (str_starts_with($part, '--')) continue;
         if (!str_contains($part, "\r\n\r\n")) continue;
 
         [$partHeaders, $partBody] = explode("\r\n\r\n", $part, 2);
         $partBody = rtrim($partBody, "\r\n");
 
-        preg_match('/Content-Disposition:[^\r\n]*name="([^"]+)"/', $partHeaders, $nm);
+        preg_match('/Content-Disposition:[^\r\n]*name="([^"]+)"/i', $partHeaders, $nm);
         $name = $nm[1] ?? '';
         if (!$name) continue;
 
-        preg_match('/filename="([^"]*)"/', $partHeaders, $fm);
+        preg_match('/filename="([^"]*)"/i', $partHeaders, $fm);
         $filename = $fm[1] ?? '';
 
         $isArray  = str_ends_with($name, '[]') || preg_match('/\[\d*\]$/', $name);
@@ -198,7 +208,6 @@ for ($i = 0; $i < $workers; $i++) {
         define('WORKER_ID', $i);
 
         // SO_REUSEPORT — her worker kendi socket'ini açıyor
-        // kernel load balance yapıyor, thundering herd yok
         $context = stream_context_create([
             'socket' => [
                 'so_reuseport' => true,
