@@ -4,7 +4,7 @@ require 'App.php';
 
 $host        = "0.0.0.0";
 $port        = $argv[1] ?? 8080;
-$workers     = $argv[2] ?? 4;
+$workers     = $argv[2] ?? 20;
 $maxRequests = $argv[3] ?? 1000;
 
 $server = stream_socket_server(
