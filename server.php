@@ -199,15 +199,23 @@ for ($i = 0; $i < $workers; $i++) {
         echo "👷 Worker #$i started (PID: " . getmypid() . ")\n";
 
         $app          = new App();
-        $connections  = [];  // keep-alive bağlantı havuzu
+        $connections  = []; // [int_key => ['socket' => resource, 'time' => int]]
         $requestCount = 0;
 
         while (true) {
-            // Hem server socket hem de keep-alive bağlantıları dinle
-            $readSockets = array_merge([$server], $connections);
+            // Geçersiz/kapalı socket'leri temizle
+            foreach ($connections as $key => $c) {
+                if (!is_resource($c['socket']) || feof($c['socket'])) {
+                    @fclose($c['socket']);
+                    unset($connections[$key]);
+                }
+            }
+
+            // stream_select için socket listesi
+            $readSockets = array_merge([$server], array_column($connections, 'socket'));
             $w = $e = [];
 
-            if (stream_select($readSockets, $w, $e, 0, 100000) === false) continue; // 100ms
+            if (stream_select($readSockets, $w, $e, 0, 100000) === false) continue;
 
             foreach ($readSockets as $sock) {
                 // Yeni bağlantı
@@ -223,15 +231,14 @@ for ($i = 0; $i < $workers; $i++) {
                     continue;
                 }
 
-                // Mevcut keep-alive bağlantıdan yeni istek
-                $connData = $connections[(int) $sock] ?? null;
-                if (!$connData) continue;
-                $conn = $connData['socket'];
+                // Keep-alive bağlantıdan yeni istek
+                if (!isset($connections[(int) $sock])) continue;
+                $conn = $sock;
 
                 $data = read_request($conn);
 
                 if (!$data) {
-                    fclose($conn);
+                    @fclose($conn);
                     unset($connections[(int) $conn]);
                     continue;
                 }
@@ -244,10 +251,9 @@ for ($i = 0; $i < $workers; $i++) {
                     fwrite($conn, $res);
 
                     if ($keepAlive) {
-                        // Bağlantıyı havuzda tut, last activity güncelle
                         $connections[(int) $conn]['time'] = time();
                     } else {
-                        fclose($conn);
+                        @fclose($conn);
                         unset($connections[(int) $conn]);
                     }
                 } catch (\Throwable $ex) {
@@ -259,7 +265,7 @@ for ($i = 0; $i < $workers; $i++) {
                         "Content-Length: " . strlen($error) . "\r\n\r\n" .
                         $error
                     );
-                    fclose($conn);
+                    @fclose($conn);
                     unset($connections[(int) $conn]);
                 } finally {
                     cleanup_tmp_files();
@@ -270,17 +276,16 @@ for ($i = 0; $i < $workers; $i++) {
                 $requestCount++;
                 if ($requestCount >= $maxRequests) {
                     echo "♻️ Worker #$i restarting after $maxRequests requests\n";
-                    // Açık bağlantıları kapat
-                    foreach ($connections as $c) fclose($c['socket']);
+                    foreach ($connections as $c) @fclose($c['socket']);
                     exit;
                 }
             }
 
-            // Keep-alive timeout — 5 saniye idle bağlantıları kapat
+            // 5 saniye idle bağlantıları kapat
             $now = time();
             foreach ($connections as $key => $c) {
                 if (($now - $c['time']) > 5) {
-                    fclose($c['socket']);
+                    @fclose($c['socket']);
                     unset($connections[$key]);
                 }
             }
