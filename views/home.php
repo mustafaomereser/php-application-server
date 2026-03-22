@@ -533,31 +533,45 @@
             document.getElementById('stat-ka').className = 'stat-value ok';
         })();
 
-        // TTFB test
         async function runTTFB() {
             const url = document.getElementById('ttfb-url').value;
             const count = parseInt(document.getElementById('ttfb-count').value) || 5;
             const el = document.getElementById('ttfb-results');
             el.innerHTML = '';
 
-            const times = [];
-            for (let i = 0; i < count; i++) {
+            const requests = Array.from({
+                length: count
+            }, (_, i) => {
                 const t0 = performance.now();
-                const r = await fetch(url + '?_t=' + Date.now()); // <-- r'ye ata
-                const ms = performance.now() - t0;
+                return fetch(url + '?_t=' + Date.now() + i)
+                    .then(r => ({
+                        r,
+                        ms: performance.now() - t0,
+                        idx: i
+                    }));
+            });
+
+            const results = await Promise.all(requests);
+            const times = [];
+
+            for (const {
+                    r,
+                    ms,
+                    idx
+                }
+                of results) {
                 const wid = r.headers.get('x-worker-id') || '?';
                 times.push(ms);
-
                 const pct = Math.min((ms / 200) * 100, 100);
                 const cls = ms < 20 ? 'var(--accent)' : ms < 100 ? 'var(--warn)' : 'var(--danger)';
                 el.innerHTML += `
-                <div class="ttfb-row">
-                    <span>#${i + 1} <span style="color:var(--muted)">w:${wid}</span></span>
-                    <span class="ttfb-val" style="color:${cls}">${ms.toFixed(2)}ms</span>
-                </div>
-                <div class="meter-wrap">
-                    <div class="meter-bar" style="width:${pct}%;background:${cls}"></div>
-                </div>`;
+            <div class="ttfb-row">
+                <span>#${idx + 1} <span style="color:var(--muted)">w:${wid}</span></span>
+                <span class="ttfb-val" style="color:${cls}">${ms.toFixed(2)}ms</span>
+            </div>
+            <div class="meter-wrap">
+                <div class="meter-bar" style="width:${pct}%;background:${cls}"></div>
+            </div>`;
             }
 
             const avg = times.reduce((a, b) => a + b, 0) / times.length;
@@ -572,7 +586,6 @@
 
             document.getElementById('stat-ttfb').textContent = avg.toFixed(1) + 'ms';
         }
-
         // POST test
         async function runPost() {
             const ct = document.getElementById('post-ct').value;
