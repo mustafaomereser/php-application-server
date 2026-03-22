@@ -36,7 +36,6 @@
             padding: 2rem;
         }
 
-        /* Grid noise overlay */
         body::before {
             content: '';
             position: fixed;
@@ -101,7 +100,6 @@
             color: var(--accent2);
         }
 
-        /* Stats row */
         .stats {
             display: grid;
             grid-template-columns: repeat(4, 1fr);
@@ -142,7 +140,10 @@
             color: var(--danger);
         }
 
-        /* Tabs */
+        .stat-value.ok {
+            color: var(--accent);
+        }
+
         .tabs {
             display: flex;
             gap: .25rem;
@@ -183,7 +184,6 @@
             display: block;
         }
 
-        /* Cards */
         .card {
             background: var(--surface);
             border: 1px solid var(--border);
@@ -200,7 +200,6 @@
             margin-bottom: 1rem;
         }
 
-        /* Form elements */
         .field {
             margin-bottom: .75rem;
         }
@@ -241,6 +240,28 @@
             min-height: 80px;
         }
 
+        .row {
+            display: flex;
+            gap: .5rem;
+            align-items: center;
+            flex-wrap: wrap;
+            margin-bottom: .75rem;
+        }
+
+        .toggle {
+            display: flex;
+            align-items: center;
+            gap: .4rem;
+            font-size: .72rem;
+            color: var(--muted);
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .toggle input {
+            width: auto;
+        }
+
         .btn {
             display: inline-flex;
             align-items: center;
@@ -279,7 +300,6 @@
             cursor: not-allowed;
         }
 
-        /* Result box */
         .result {
             background: var(--bg);
             border: 1px solid var(--border);
@@ -311,17 +331,12 @@
             color: var(--warn);
         }
 
-        .result .key {
-            color: var(--muted);
-        }
-
-        /* TTFB meter */
         .meter-wrap {
             height: 6px;
             background: var(--border);
             border-radius: 3px;
             overflow: hidden;
-            margin: .5rem 0;
+            margin: .3rem 0 .6rem;
         }
 
         .meter-bar {
@@ -336,14 +351,12 @@
             justify-content: space-between;
             font-size: .7rem;
             color: var(--muted);
-            margin-bottom: .25rem;
         }
 
         .ttfb-val {
             font-weight: 700;
         }
 
-        /* $_SERVER table */
         .server-table {
             width: 100%;
             border-collapse: collapse;
@@ -370,24 +383,6 @@
             word-break: break-all;
         }
 
-        /* Spinner */
-        .spin {
-            display: inline-block;
-            width: 10px;
-            height: 10px;
-            border: 2px solid var(--muted);
-            border-top-color: var(--accent);
-            border-radius: 50%;
-            animation: spin .6s linear infinite;
-        }
-
-        @keyframes spin {
-            to {
-                transform: rotate(360deg);
-            }
-        }
-
-        /* Responsive */
         @media (max-width: 600px) {
             .stats {
                 grid-template-columns: repeat(2, 1fr);
@@ -441,9 +436,14 @@
                     <label>Endpoint</label>
                     <input type="text" id="ttfb-url" value="/">
                 </div>
-                <div class="field">
-                    <label>İstek sayısı</label>
-                    <input type="text" id="ttfb-count" value="10">
+                <div class="row">
+                    <div style="flex:1">
+                        <label>İstek sayısı</label>
+                        <input type="text" id="ttfb-count" value="10">
+                    </div>
+                    <label class="toggle" style="margin-top:1.2rem">
+                        <input type="checkbox" id="ttfb-keepalive"> Keep-Alive
+                    </label>
                 </div>
                 <button class="btn btn-green" onclick="runTTFB()">▶ Çalıştır</button>
                 <div id="ttfb-results" style="margin-top:1rem"></div>
@@ -496,12 +496,10 @@
                     <?php endforeach; ?>
                 </table>
             </div>
-
             <div class="card">
                 <div class="card-title">$_GET</div>
                 <div class="result"><?= $_GET ? htmlspecialchars(json_encode($_GET, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)) : '<span class="warn">boş</span>' ?></div>
             </div>
-
             <div class="card">
                 <div class="card-title">$_POST</div>
                 <div class="result"><?= $_POST ? htmlspecialchars(json_encode($_POST, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)) : '<span class="warn">boş</span>' ?></div>
@@ -527,23 +525,32 @@
             document.getElementById('stat-ttfb').textContent = t1.toFixed(1) + 'ms';
             document.getElementById('stat-ttfb').className = 'stat-value ' + (t1 < 20 ? '' : t1 < 100 ? 'warn' : 'danger');
 
-            const t2 = performance.now();
             const r = await fetch('/');
             document.getElementById('stat-ka').textContent = r.headers.get('connection') || 'keep-alive';
             document.getElementById('stat-ka').className = 'stat-value ok';
         })();
 
+        // TTFB test
         async function runTTFB() {
             const url = document.getElementById('ttfb-url').value;
             const count = parseInt(document.getElementById('ttfb-count').value) || 5;
+            const keepAlive = document.getElementById('ttfb-keepalive').checked;
             const el = document.getElementById('ttfb-results');
             el.innerHTML = '';
+
+            const headers = keepAlive ?
+                {} :
+                {
+                    'Connection': 'close'
+                };
 
             const requests = Array.from({
                 length: count
             }, (_, i) => {
                 const t0 = performance.now();
-                return fetch(url + '?_t=' + Date.now() + i)
+                return fetch(url + '?_t=' + Date.now() + i, {
+                        headers
+                    })
                     .then(r => ({
                         r,
                         ms: performance.now() - t0,
@@ -586,6 +593,7 @@
 
             document.getElementById('stat-ttfb').textContent = avg.toFixed(1) + 'ms';
         }
+
         // POST test
         async function runPost() {
             const ct = document.getElementById('post-ct').value;
