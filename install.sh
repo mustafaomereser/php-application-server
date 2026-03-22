@@ -64,6 +64,12 @@ echo "🔑 Creating ACME challenge directory"
 sudo mkdir -p $APP_DIR/.well-known/acme-challenge
 sudo chown -R www-data:www-data $APP_DIR/.well-known
 
+# SSL session ticket key
+echo "🔐 Generating SSL session ticket key..."
+sudo openssl rand 80 | sudo tee /etc/nginx/ssl_ticket.key > /dev/null
+sudo chmod 600 /etc/nginx/ssl_ticket.key
+sudo chown root:root /etc/nginx/ssl_ticket.key
+
 # systemd service
 if [ "$DAEMON_SUPPORT" = true ]; then
     echo "⚙️ Creating systemd service..."
@@ -93,13 +99,15 @@ else
     echo "⚠️ Daemon setup skipped. Run manually: php $APP_DIR/server.php $PORT"
 fi
 
-# Nginx config — upstream keepalive ile
+# Nginx config
 NGINX_CONF="/etc/nginx/sites-available/$APP_NAME"
 
 sudo bash -c "cat > $NGINX_CONF" <<EOL
 upstream ${APP_NAME}_backend {
     server 127.0.0.1:$PORT;
     keepalive 32;
+    keepalive_requests 1000;
+    keepalive_timeout 65s;
 }
 
 server {
@@ -112,6 +120,21 @@ server {
     }
 
     location / {
+        return 301 https://\$host\$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    server_name $DOMAIN www.$DOMAIN;
+
+    ssl_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+    ssl_session_ticket_key /etc/nginx/ssl_ticket.key;
+
+    location / {
         proxy_pass http://${APP_NAME}_backend;
         proxy_http_version 1.1;
         proxy_set_header Connection "";
@@ -119,26 +142,21 @@ server {
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_buffering off;
         proxy_request_buffering off;
-        proxy_read_timeout 10s;
     }
 }
 EOL
 
+# options-ssl-nginx.conf içinde session tickets'ı aç
+sudo sed -i 's/ssl_session_tickets off/ssl_session_tickets on/' /etc/letsencrypt/options-ssl-nginx.conf
+
 sudo ln -sf $NGINX_CONF /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl restart nginx
-echo "✅ Nginx configured for $DOMAIN on port 80"
+echo "✅ Nginx configured"
 
 # SSL
+echo "🔒 Obtaining SSL certificate..."
 sudo certbot --nginx -d $DOMAIN -d www.$DOMAIN --non-interactive --agree-tos -m admin@$DOMAIN
 
-# SSL session cache için nginx.conf'a snippet ekle
-sudo bash -c "cat >> /etc/nginx/conf.d/ssl_session.conf" <<EOL
-ssl_session_cache shared:SSL:10m;
-ssl_session_timeout 10m;
-ssl_session_tickets on;
-ssl_protocols TLSv1.2 TLSv1.3;
-ssl_prefer_server_ciphers off;
-EOL
-
 sudo systemctl reload nginx
-echo "🔥 Full installation complete! Your app is running at https://$DOMAIN"
+
+echo "🔥 Done! Your app is running at https://$DOMAIN"
