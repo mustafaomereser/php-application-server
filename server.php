@@ -25,24 +25,21 @@ function parse_request_raw(string $raw): object
 {
     preg_match('#(GET|POST|PUT|PATCH|DELETE) (.*?) HTTP#', $raw, $m);
 
-    // Headers
     $headers = [];
     $lines   = explode("\r\n", $raw);
     foreach (array_slice($lines, 1) as $line) {
         if (!str_contains($line, ': ')) continue;
-        [$k, $v]    = explode(': ', $line, 2);
+        [$k, $v]              = explode(': ', $line, 2);
         $headers[strtolower($k)] = $v;
     }
 
-    // Body
     $body = '';
     if (str_contains($raw, "\r\n\r\n")) {
         [, $body] = explode("\r\n\r\n", $raw, 2);
     }
 
-    // Query string
-    $uri      = $m[2] ?? '/';
-    $query    = [];
+    $uri   = $m[2] ?? '/';
+    $query = [];
     if (str_contains($uri, '?')) {
         [$uri, $qs] = explode('?', $uri, 2);
         parse_str($qs, $query);
@@ -63,9 +60,7 @@ function read_request($sock): string
     $data = '';
 
     while (true) {
-        $r = [$sock];
-        $w = $e = [];
-        // 5ms bekle, gelmezse çık
+        $r = [$sock]; $w = $e = [];
         if (!stream_select($r, $w, $e, 0, 5000)) break;
 
         $chunk = fread($sock, 8192);
@@ -75,10 +70,10 @@ function read_request($sock): string
 
         if (str_contains($data, "\r\n\r\n")) {
             preg_match('/Content-Length:\s*(\d+)/i', $data, $cl);
-            if (!$cl) break; // GET request, headers tamam, çık
+            if (!$cl) break;
 
             [, $body] = explode("\r\n\r\n", $data, 2);
-            if (strlen($body) >= (int) $cl[1]) break; // POST body tamam, çık
+            if (strlen($body) >= (int) $cl[1]) break;
         }
     }
 
@@ -101,7 +96,6 @@ for ($i = 0; $i < $workers; $i++) {
             }
 
             foreach ($readSockets as $sock) {
-                // Yeni bağlantı
                 if ($sock === $server) {
                     $conn = stream_socket_accept($server, 0);
                     if ($conn) {
@@ -111,7 +105,6 @@ for ($i = 0; $i < $workers; $i++) {
                     continue;
                 }
 
-                // Mevcut bağlantıdan veri oku
                 $data = read_request($sock);
 
                 if (!$data) {
@@ -122,38 +115,24 @@ for ($i = 0; $i < $workers; $i++) {
 
                 try {
                     $req       = parse_request_raw($data);
-                    $keepAlive = ($req->headers['connection'] ?? '') === 'keep-alive';
+                    $keepAlive = strtolower($req->headers['connection'] ?? '') === 'keep-alive';
 
-                    $res = $app->handle($req);
+                    $res = $app->handle($req, $keepAlive);
 
-                    // Keep-alive header ekle
-                    if ($keepAlive) {
-                        $res = str_replace(
-                            "HTTP/1.1 ",
-                            "HTTP/1.1 ",
-                            $res
-                        );
-                        // Connection header'ı response'a enjekte et
-                        $res = preg_replace(
-                            '/(\r\nContent-Length:)/',
-                            "\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5, max=1000$1",
-                            $res
-                        );
-                        fwrite($sock, $res);
-                        // Bağlantıyı kapatma, bir sonraki request için bekle
-                    } else {
-                        fwrite($sock, $res);
+                    fwrite($sock, $res);
+
+                    if (!$keepAlive) {
                         fclose($sock);
                         unset($connections[(int) $sock]);
                     }
                 } catch (\Throwable $e) {
                     $error = "500 Internal Server Error\n" . $e->getMessage();
-                    fwrite(
-                        $sock,
+                    fwrite($sock,
                         "HTTP/1.1 500 Internal Server Error\r\n" .
-                            "Content-Type: text/plain\r\n" .
-                            "Content-Length: " . strlen($error) . "\r\n\r\n" .
-                            $error
+                        "Content-Type: text/plain\r\n" .
+                        "Connection: close\r\n" .
+                        "Content-Length: " . strlen($error) . "\r\n\r\n" .
+                        $error
                     );
                     fclose($sock);
                     unset($connections[(int) $sock]);
@@ -167,5 +146,4 @@ for ($i = 0; $i < $workers; $i++) {
     }
 }
 
-// Parent beklesin
 while (pcntl_wait($status) > 0);
