@@ -548,7 +548,7 @@
                 length: count
             }, (_, i) => {
                 const t0 = performance.now();
-                return fetch(url + '?_t=' + Date.now() + i, {
+                return fetch(url + '?_t=' + Date.now() + i + (keepAlive ? '' : '&_close=1'), {
                         headers
                     })
                     .then(r => ({

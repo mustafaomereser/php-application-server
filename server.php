@@ -28,7 +28,8 @@ function read_request($sock): string
     $start = microtime(true);
 
     while (true) {
-        $r = [$sock]; $w = $e = [];
+        $r = [$sock];
+        $w = $e = [];
         if (!stream_select($r, $w, $e, 0, 1000)) break;
 
         $chunk = fread($sock, 65536);
@@ -243,8 +244,9 @@ for ($i = 0; $i < $workers; $i++) {
 
                 try {
                     $req       = parse_request_raw($data);
-                    $keepAlive = strtolower($req->headers['connection'] ?? 'keep-alive') !== 'close';
-
+                    $keepAlive = strtolower($req->headers['connection'] ?? 'keep-alive') !== 'close'
+                        && !isset($req->query['_close']);
+                        
                     $res = $app->handle($req, $keepAlive);
                     fwrite($sock, $res);
 
@@ -256,12 +258,13 @@ for ($i = 0; $i < $workers; $i++) {
                     }
                 } catch (\Throwable $ex) {
                     $error = "500 Internal Server Error\n" . $ex->getMessage();
-                    fwrite($sock,
+                    fwrite(
+                        $sock,
                         "HTTP/1.1 500 Internal Server Error\r\n" .
-                        "Content-Type: text/plain\r\n" .
-                        "Connection: close\r\n" .
-                        "Content-Length: " . strlen($error) . "\r\n\r\n" .
-                        $error
+                            "Content-Type: text/plain\r\n" .
+                            "Connection: close\r\n" .
+                            "Content-Length: " . strlen($error) . "\r\n\r\n" .
+                            $error
                     );
                     @fclose($sock);
                     unset($connections[$key], $socketMap[$key]);
