@@ -34,6 +34,11 @@ function read_request($sock): string
         if ((microtime(true) - $start) > 30) break;
     }
 
+    // Geçerli HTTP request değilse boş dön
+    if (!preg_match('#^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) .+ HTTP/#', $data)) {
+        return '';
+    }
+
     return $data;
 }
 
@@ -280,6 +285,7 @@ for ($i = 0; $i < $workers; $i++) {
 
                 try {
                     $req       = parse_request_raw($data);
+                    print_r($req->headers);
                     $keepAlive = strtolower($req->headers['connection'] ?? 'keep-alive') !== 'close'
                                  && !isset($req->query['_close']);
 
