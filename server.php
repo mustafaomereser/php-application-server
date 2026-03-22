@@ -198,12 +198,15 @@ function reset_superglobals(): void
     $_GET = $_POST = $_FILES = $_REQUEST = $_SERVER = [];
 }
 
+
+$app = new App(); // once boot
 for ($i = 0; $i < $workers; $i++) {
     if (pcntl_fork() === 0) {
+        // $app = new App(); // boot for every worker
+
         define('WORKER_ID', $i);
         echo "👷 Worker #$i started (PID: " . getmypid() . ")\n";
 
-        $app          = new App();
         $connections  = []; // [socket_int_key => ['socket' => resource, 'time' => int]]
         $socketMap    = []; // stream_select sonuçlarını hızlı lookup için
         $requestCount = 0;
@@ -246,7 +249,7 @@ for ($i = 0; $i < $workers; $i++) {
                     $req       = parse_request_raw($data);
                     $keepAlive = strtolower($req->headers['connection'] ?? 'keep-alive') !== 'close'
                         && !isset($req->query['_close']);
-                        
+
                     $res = $app->handle($req, $keepAlive);
                     fwrite($sock, $res);
 

@@ -1,3 +1,13 @@
 git pull
 sudo cp -r ~/myapp/. /var/www/myphpapp/
 sudo systemctl restart myphpapp
+
+-- 
+
+for i in {1..20}; do
+  curl -s -o /dev/null \
+    -H "Connection: close" \
+    -w "w:%header{x-worker-id} %{time_starttransfer}s\n" \
+    http://127.0.0.1:8080/ &
+done
+wait
